@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>通檢</title>
+<link rel="stylesheet" href="/static/app.css">
+<script>window.TJ = { token: "__TJ_TOKEN__", native: "__TJ_NATIVE__" === "1" };</script>
+</head>
+<body>
+<div id="app" class="app">
+  <aside id="sidebar" class="sidebar"></aside>
+  <div class="resizer" data-resize="sidebar"></div>
+  <main class="main">
+    <header class="toolbar">
+      <div class="search">
+        <svg class="search-ic" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 20 20"/></svg>
+        <input id="q" type="search" autocomplete="off" spellcheck="false"
+               placeholder="檢索文件名與全文 —— 簡、繁、異體互通">
+        <button id="q-clear" class="q-clear" title="清除" hidden>
+          <svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7 7 17"/></svg>
+        </button>
+        <kbd class="q-kbd">⌘K</kbd>
+      </div>
+      <div class="seg" id="mode" role="radiogroup" aria-label="匹配方式">
+        <button data-mode="exact" title="精確：只匹配輸入的字形（不分大小寫、全半角）">精確</button>
+        <button data-mode="st" title="簡繁：簡體與繁體互通">簡繁</button>
+        <button data-mode="full" title="異體：簡繁、異體、舊字形、日本新字體、兼容漢字全部互通">異體</button>
+      </div>
+      <div class="select-wrap" title="檢索範圍">
+        <select id="scope">
+          <option value="name">僅文件名</option>
+          <option value="all">名稱與全文</option>
+          <option value="content">僅全文</option>
+        </select>
+      </div>
+      <div class="select-wrap" title="排序">
+        <select id="sort">
+          <option value="relevance">按相關度</option>
+          <option value="hits">按命中數</option>
+          <option value="mtime">按修改時間</option>
+          <option value="name">按文件名</option>
+          <option value="size">按大小</option>
+        </select>
+      </div>
+      <button class="icon-btn" id="help-btn" title="檢索語法">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.3a2.5 2.5 0 1 1 3.6 2.3c-.8.4-1.2 1-1.2 1.9v.3"/><circle cx="12" cy="17" r=".6" class="fill"/></svg>
+      </button>
+    </header>
+    <div id="variant-bar" class="variant-bar" hidden></div>
+    <div class="content">
+      <section id="results" class="results">
+        <div id="res-head" class="res-head"></div>
+        <div id="res-list" class="res-list" tabindex="0"></div>
+      </section>
+      <div class="resizer" data-resize="list"></div>
+      <section id="preview" class="preview"></section>
+    </div>
+  </main>
+</div>
+<div id="layer"></div>
+<div id="toasts" class="toasts"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
