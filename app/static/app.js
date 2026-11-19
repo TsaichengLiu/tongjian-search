@@ -55,7 +55,6 @@ const S = {
   dirs: {}, openRoots: new Set(), openDirs: new Set(),
   readerSize: 16, lastRescan: 0,
 };
-try { S.readerSize = +localStorage.getItem('tj.readerSize') || 16; } catch (e) { /* 無存儲 */ }
 
 async function api(path, body) {
   const opt = { headers: { 'X-TJ-Token': S.token } };
@@ -1619,7 +1618,7 @@ $('#preview').addEventListener('click', async e => {
     case 'orig-page': S.origPage = curPage(); S.pvTab = S.pvTabPref = 'orig'; return renderPreviewBody();
     case 'font-up': case 'font-down': {
       S.readerSize = Math.max(12, Math.min(28, S.readerSize + (b.dataset.act === 'font-up' ? 1 : -1)));
-      try { localStorage.setItem('tj.readerSize', S.readerSize); } catch (err) { /* 忽略 */ }
+      api('settings', { reader_size: S.readerSize }).catch(() => {});
       const r = $('#reader'); if (r) r.style.setProperty('--reader-size', S.readerSize + 'px');
       if (S.hitEls[S.hit]) S.hitEls[S.hit].scrollIntoView({ block: 'center' });
     }
@@ -1773,7 +1772,6 @@ async function resetSettings() {
     renderFuzzy();
     S.folderView = undefined;
     S.readerSize = 16;
-    try { localStorage.removeItem('tj.readerSize'); } catch (e) { /* 忽略 */ }
     document.documentElement.style.removeProperty('--sidebar-w');
     document.documentElement.style.removeProperty('--list-w');
     $$('#mode button').forEach(b => b.classList.toggle('on', b.dataset.mode === S.mode));
@@ -1963,6 +1961,7 @@ async function init() {
     S.sort = st.settings.sort || 'relevance';
     S.fuzzy = st.settings.fuzzy === '1';
     S.fzSim = ['0.9', '0.8', '0.7', '0.6', '0.5'].includes(st.settings.fuzzy_sim) ? st.settings.fuzzy_sim : '0.7';
+    S.readerSize = Math.max(12, Math.min(28, +st.settings.reader_size || 16));
     if (+st.settings.sidebar_w) document.documentElement.style.setProperty('--sidebar-w', st.settings.sidebar_w + 'px');
     if (+st.settings.list_w) document.documentElement.style.setProperty('--list-w', st.settings.list_w + 'px');
   } catch (e) { fail(e); }

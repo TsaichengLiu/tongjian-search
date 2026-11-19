@@ -132,6 +132,9 @@ class Normalizer(object):
         self.index_map = _IndexMap(self.maps["full"])
         self._content = {}
 
+    def drop_content_maps(self):
+        self._content = {}
+
     def content_map(self, level):
         """模糊檢索用：歸一字形並刪去空白、標點（見 tj_fuzzy.ContentMap）。"""
         m = self._content.get(level)

@@ -376,7 +376,7 @@ class Handler(BaseHTTPRequestHandler):
 
 SETTING_KEYS = ("custom_variants", "excludes", "cross_punct", "rescan_minutes", "watch", "skip_projects",
                 "code_fulltext", "mode", "scope", "sidebar_w", "list_w", "sort", "collation", "folder_view",
-                "fuzzy", "fuzzy_sim")
+                "fuzzy", "fuzzy_sim", "reader_size")
 
 
 class Server(ThreadingHTTPServer):

@@ -197,7 +197,8 @@ class NameIndex(object):
         self.f_blob, self.f_starts, self.f_ids = "\n", [], []
         self.d_blob, self.d_starts, self.d_paths = "\n", [], []
         self.z_fblob, self.z_fstarts, self.z_dblob, self.z_dstarts = "\n", [], "\n", []
-        self.keytab = self.ztab = {}
+        self.z_built = 0
+        self.keytab = {}
 
     def mark(self):
         self.version += 1
@@ -219,13 +220,11 @@ class NameIndex(object):
                 return
             tab = dict(self.lib.norm.tables["full"])
             tab.update(WS_DELETE)
-            ztab = self.lib.norm.content_map("full")     # 模糊檢索：連標點也去掉
             c = sqlite3.connect(self.lib.db_path, timeout=30)
-            ids, parts, zparts, dirs = [], [], [], set()
+            ids, parts, dirs = [], [], set()
             for fid, name, d in c.execute("SELECT id, name, dir FROM files"):
                 ids.append(fid)
                 parts.append(name.translate(tab))
-                zparts.append(name.translate(ztab))
                 dirs.add(d)
             rootset = set(r[0] for r in c.execute("SELECT path FROM roots"))
             c.close()
@@ -243,11 +242,37 @@ class NameIndex(object):
             self.f_ids = ids
             self.d_blob, self.d_starts = self._join([os.path.basename(p).translate(tab) for p in dpaths])
             self.d_paths = dpaths
-            self.z_fblob, self.z_fstarts = self._join(zparts)
-            self.z_dblob, self.z_dstarts = self._join([os.path.basename(p).translate(ztab) for p in dpaths])
             self.keytab = tab
-            self.ztab = ztab
             self.built = v
+            self._drop_fuzzy()
+
+    def _drop_fuzzy(self):
+        self.z_built = 0
+        self.z_fblob, self.z_fstarts, self.z_dblob, self.z_dstarts = "\n", [], "\n", []
+
+    def drop_fuzzy(self):
+        with self.lock:
+            self._drop_fuzzy()
+
+    def ensure_fuzzy(self):
+        """模糊檢索用的去標點名稱表（約 2–3 MB）：第一次模糊檢索文件名時才建，空閒時隨全文緩存一起釋放。"""
+        self.ensure()
+        with self.lock:
+            if self.z_built == self.built:
+                return self.z_fblob, self.z_fstarts, self.z_dblob, self.z_dstarts
+            ztab = self.lib.norm.content_map("full")
+            pos = dict((fid, k) for k, fid in enumerate(self.f_ids))
+            zparts = [""] * len(self.f_ids)
+            c = sqlite3.connect(self.lib.db_path, timeout=30)
+            for fid, name in c.execute("SELECT id, name FROM files"):
+                k = pos.get(fid)
+                if k is not None:
+                    zparts[k] = name.translate(ztab)
+            c.close()
+            self.z_fblob, self.z_fstarts = self._join(zparts)
+            self.z_dblob, self.z_dstarts = self._join([os.path.basename(p).translate(ztab) for p in self.d_paths])
+            self.z_built = self.built
+            return self.z_fblob, self.z_fstarts, self.z_dblob, self.z_dstarts
 
     @staticmethod
     def _find(blob, starts, key):
@@ -264,6 +289,9 @@ class NameIndex(object):
         """返回 (文件 id 集合, 文件夾路徑集合)；檢索詞無法預篩時返回 None（退回逐條匹配）。
         fuzzy：{檢索詞: FuzzyTerm}，這些詞按鴿巢原理取「任一段原樣出現」的名稱為候選。"""
         self.ensure()
+        zblobs = None
+        if fuzzy and any(a in fuzzy for g in groups if not g["neg"] for a in g["alts"]):
+            zblobs = self.ensure_fuzzy()           # 取一份快照：空閒釋放不影響正在進行的檢索
         fs = ds = None
         for g in groups:
             if g["neg"]:
@@ -272,8 +300,8 @@ class NameIndex(object):
             for a in g["alts"]:
                 ft = fuzzy.get(a) if fuzzy else None
                 if ft is not None:
-                    keys = [pc for _, pc in fz_pieces(ft.q.translate(self.ztab), ft.maxd)]
-                    blobs = (self.z_fblob, self.z_fstarts, self.z_dblob, self.z_dstarts)
+                    keys = [pc for _, pc in fz_pieces(ft.q.translate(self.lib.norm.content_map("full")), ft.maxd)]
+                    blobs = zblobs
                 else:
                     if re.search(r"[0-9A-Za-z][\s\W_]+[0-9A-Za-z]", a.strip()):
                         return None          # 含空格／標點的西文短語，正則允許間隔，不能用子串預篩
@@ -511,6 +539,8 @@ class Library(object):
                     self.last_relief = now
                     if now - self.last_use > 300:
                         self.text_cache.clear()     # 5 分鐘沒有檢索：清空全文緩存
+                        self.norm.drop_content_maps()   # 以及模糊檢索的字表、名稱表（用時幾毫秒重建）
+                        self.names.drop_fuzzy()
                     release_memory()
                 with self.fs_lock:
                     ready = bool(self.fs_pending) and (now - self.fs_last > 1.0 or now - self.fs_first > 5.0)
@@ -1025,22 +1055,75 @@ class Library(object):
         return ph
 
     def fts_fuzzy(self, ft):
-        """模糊詞的 FTS 候選式。按詞元（漢字逐字、西文逐詞）分成「錯字數 + 2」段：每處差異至多破壞一段，
-        所以近似出現處至少有兩段原樣保留 → 候選文件須含其中任意兩段（比「任一段」嚴得多，又不會漏）。"""
+        """模糊詞的全文預篩 → [(FTS 短語列表, 至少要含幾個)]，候選文件須同時滿足每一條（都是必要條件，不會漏）。
+        按詞元（漢字逐字、西文逐詞）分成 n 段，每處差異至多破壞一段，近似出現處至少有 n − 錯字數 段原樣保留：
+        ① 盡量兩個一段（檢索詞長時最嚴）；② 分成「錯字數 + 2」段、至少含兩段（檢索詞短時最嚴）。"""
         t = self.norm.norm(ft.term, "full")
         units = re.findall(r"[%s]|[^\W_%s]+" % (CJK_RE_CLASS, CJK_RE_CLASS), t)
+        u, d = len(units), ft.maxd
 
-        def split(n):
-            return [" ".join(units[i * len(units) // n:(i + 1) * len(units) // n]) for i in range(n)]
-        n = ft.maxd + 2
-        if len(units) >= n:
-            phs = [self.fts_phrase(x) for x in split(n)]
-            if all(phs):
-                return " OR ".join("(%s AND %s)" % (phs[i], phs[j])
-                                   for i in range(n) for j in range(i + 1, n))
-        parts = split(ft.maxd + 1) if len(units) >= ft.maxd + 1 else units
-        phs = [x for x in (self.fts_phrase(x) for x in parts) if x]
-        return " OR ".join(phs) if phs else None
+        def phrases(n):
+            return [self.fts_phrase(" ".join(units[i * u // n:(i + 1) * u // n])) for i in range(n)]
+        if not u:
+            return []
+        if u < d + 1:
+            # 詞元太少（如一兩個西文單詞），差異可能落在每個詞元上，無法保證：退而取「含任一詞元」
+            phs = [x for x in phrases(u) if x]
+            return [(phs, 1)] if phs else []
+        rules = []
+        for n in sorted(set([max(d + 1, u // 2), min(u, d + 2)])):
+            phs = phrases(n)
+            need = n - d - sum(1 for x in phs if x is None)
+            phs = [x for x in phs if x]
+            if phs and need >= 1:
+                rules.append((phs, need))
+        return rules
+
+    def _fuzzy_candidates(self, c, Q, cols, where, args, limit=20000):
+        """模糊檢索的全文候選：每組算出各文件含檢索詞多少段（在 SQLite 裡計數），各組取交集，
+        按所含比例排序（含得越多越可能相似，先覆核）。沒有一組能預篩時返回 None。"""
+        score = None
+        for g in Q.groups:
+            if g["neg"]:
+                continue
+            gs, ok = {}, True
+            for a in g["alts"]:
+                if a in Q.fuzzy:
+                    rules = self.fts_fuzzy(Q.fuzzy[a])
+                    if not rules:
+                        ok = False
+                        break
+                    sc = None
+                    for phs, need in rules:
+                        sub = " UNION ALL ".join(["SELECT rowid AS id FROM fts WHERE fts MATCH ?"] * len(phs))
+                        rows = c.execute("SELECT id, COUNT(*) FROM (%s) GROUP BY id HAVING COUNT(*) >= ?" % sub,
+                                         phs + [need])
+                        cur = dict((fid, float(k) / len(phs)) for fid, k in rows)
+                        sc = cur if sc is None else dict((k, max(v, sc[k])) for k, v in cur.items() if k in sc)
+                    for fid, v in sc.items():
+                        if v > gs.get(fid, 0):
+                            gs[fid] = v
+                else:
+                    ph = self.fts_phrase(a)
+                    if ph is None:
+                        ok = False
+                        break
+                    for (fid,) in c.execute("SELECT rowid FROM fts WHERE fts MATCH ?", (ph,)):
+                        gs[fid] = 1.0
+            if not ok:
+                continue                       # 這組無法預篩（如純標點），交由覆核
+            score = gs if score is None else dict((k, v + score[k]) for k, v in gs.items() if k in score)
+        if score is None:
+            return None
+        ids = sorted(score, key=lambda k: -score[k])[:limit]
+        rows = []
+        for i in range(0, len(ids), 900):
+            chunk = ids[i:i + 900]
+            rows += c.execute("SELECT %s FROM files f WHERE f.id IN (%s)%s" % (
+                cols, ",".join("?" * len(chunk)), (" AND " + " AND ".join(where)) if where else ""),
+                chunk + args).fetchall()
+        rows.sort(key=lambda r: -score[r["id"]])
+        return rows
 
     @staticmethod
     def scope_set(p):
@@ -1154,7 +1237,7 @@ class Library(object):
         Q.qlev = set(Q.lmap.get(ch, ch) for ch in Q.qset) if Q.fuzzy else None
         return Q
 
-    def _match_all(self, text, pos, neg, cap=3000, info=None):
+    def _match_all(self, text, pos, neg, cap=3000, info=None, stop=None):
         """全部正向組命中且無排除詞命中時，返回排序後的命中區間；否則 None。
         info 若給出，填入 sim：各組最佳命中相似度的最小值（精確命中為 1）。"""
         for rxs in neg:
@@ -1166,7 +1249,7 @@ class Library(object):
             got, best = False, 0.0
             for rx in rxs:
                 if isinstance(rx, FuzzyTerm):
-                    for a, b, d in rx.finditer(text, cap, ctx):
+                    for a, b, d in rx.finditer(text, cap, ctx, stop):
                         spans.append((a, b))
                         got = True
                         best = max(best, 1.0 - float(d) / rx.m)
@@ -1302,12 +1385,16 @@ class Library(object):
             for it in self._match_folders(c, p, Q, dcand):
                 found[it["id"]] = it
         # ---- 全文
+        budget = float(p.get("budget") or 6.0)
+
+        def stop():
+            return _now() - t0 > budget or bool(gen and self.search_gen != gen)
         if scope in ("all", "content"):
             fts_pos = []
             for g in groups:
                 if g["neg"]:
                     continue
-                phs = [self.fts_fuzzy(Q.fuzzy[a]) if a in Q.fuzzy else self.fts_phrase(a) for a in g["alts"]]
+                phs = [self.fts_phrase(a) for a in g["alts"]]
                 if any(ph is None for ph in phs):
                     continue        # 純標點，FTS 無法表達，交由正則覆核
                 fts_pos.append("(" + " OR ".join(phs) + ")")
@@ -1319,7 +1406,10 @@ class Library(object):
                         phs = [x for x in phs if x]
                         if phs:
                             fts_q += " NOT (" + " OR ".join(phs) + ")"
-            if fts_q:
+            cand = None
+            if Q.fuzzy:
+                cand = self._fuzzy_candidates(c, Q, cols, where, args)
+            elif fts_q:
                 sql = ("SELECT %s, bm25(fts) AS rank FROM fts JOIN files f ON f.id=fts.rowid "
                        "WHERE fts MATCH ? %s ORDER BY rank LIMIT 20000") % (
                     cols, (" AND " + " AND ".join(where)) if where else "")
@@ -1328,7 +1418,7 @@ class Library(object):
                 except sqlite3.OperationalError as e:
                     self.log("fts error %s: %s" % (fts_q, e))
                     cand = []
-                budget = float(p.get("budget") or 6.0)
+            if cand is not None:
                 verified = 0
                 n = len(cand)
                 for i, r in enumerate(cand):
@@ -1342,7 +1432,7 @@ class Library(object):
                     if text is None:
                         continue
                     info = {}
-                    spans = self._match_all(text, pos, neg, info=info)
+                    spans = self._match_all(text, pos, neg, info=info, stop=stop if Q.fuzzy else None)
                     if spans is None:
                         continue
                     verified += 1
@@ -1470,7 +1560,8 @@ class Library(object):
 
     # 「恢復默認設置」會重置的項；自定義異體字與排除列表另行勾選
     RESETTABLE = ("cross_punct", "rescan_minutes", "watch", "skip_projects", "code_fulltext", "mode", "scope",
-                  "sort", "collation", "sidebar_w", "list_w", "folder_view", "fuzzy", "fuzzy_sim")
+                  "sort", "collation", "sidebar_w", "list_w", "folder_view", "fuzzy", "fuzzy_sim",
+                  "reader_size")
 
     def reset_settings(self, variants=False, excludes=False):
         keys = list(self.RESETTABLE) + (["custom_variants"] if variants else []) + (["excludes"] if excludes else [])
@@ -1763,10 +1854,14 @@ class Library(object):
         """單個文件內的命中：(區間, 模糊命中裡與檢索詞不同的字的位置, 檢索字集)。下標按 UTF-16 計（給瀏覽器用）。"""
         Q = self._query(q, level, fz)
         spans, ctx = [], {}
+        t_end = _now() + 20.0              # 極長的檢索詞配極低的相似度時，最多算 20 秒
+
+        def stop():
+            return _now() > t_end
         for ms in Q.pos:
             for rx in ms:
                 if isinstance(rx, FuzzyTerm):
-                    spans += [(a, b) for a, b, _ in rx.finditer(text, cap, ctx)]
+                    spans += [(a, b) for a, b, _ in rx.finditer(text, cap, ctx, stop)]
                     continue
                 for m in rx.finditer(text):
                     if m.end() > m.start():
@@ -1776,6 +1871,7 @@ class Library(object):
         spans.sort()
         diffs = []
         if Q.fuzzy:
+            spans = [x for k, x in enumerate(spans) if not k or x != spans[k - 1]]
             lm, ql = Q.lmap, Q.qlev
             for a, b in spans:
                 for i in range(a, b):

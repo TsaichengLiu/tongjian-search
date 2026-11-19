@@ -29,6 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     let token = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
 
     func applicationDidFinishLaunching(_ n: Notification) {
+        removeWebKitLeftovers()
         buildMenu()
         buildWindow()
         startServer()
@@ -40,6 +41,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         quitting = true
         try? serverIn?.fileHandleForWriting.close()
         if let p = server, p.isRunning { p.terminate() }
+    }
+
+    // 界面用內存數據存儲（見 buildWindow），WebKit 不在磁盤上留緩存；舊版留下的目錄在這裡清掉
+    func removeWebKitLeftovers() {
+        guard let id = Bundle.main.bundleIdentifier else { return }
+        let lib = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
+        for rel in ["Caches/\(id)", "WebKit/\(id)"] {
+            let u = lib.appendingPathComponent(rel)
+            if FileManager.default.fileExists(atPath: u.path) { try? FileManager.default.removeItem(at: u) }
+        }
     }
 
     // MARK: 窗口
@@ -56,6 +67,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         if !window.setFrameUsingName("TongJianMain") { window.center() }
 
         let cfg = WKWebViewConfiguration()
+        // 不寫磁盤：網頁緩存、LocalStorage 等都只在內存裡（縮略圖由後台服務自己緩存，設置存在資料庫）
+        cfg.websiteDataStore = .nonPersistent()
         cfg.userContentController.add(self, name: "tj")
         cfg.preferences.setValue(true, forKey: "developerExtrasEnabled")
         web = WKWebView(frame: window.contentView!.bounds, configuration: cfg)
