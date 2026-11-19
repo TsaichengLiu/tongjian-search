@@ -14,6 +14,7 @@ import subprocess
 import threading
 import time
 import traceback
+import urllib.parse
 import zlib
 from collections import OrderedDict, defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -220,7 +221,7 @@ class NameIndex(object):
                 return
             tab = dict(self.lib.norm.tables["full"])
             tab.update(WS_DELETE)
-            c = sqlite3.connect(self.lib.db_path, timeout=30)
+            c = self.lib.open_db()
             ids, parts, dirs = [], [], set()
             for fid, name, d in c.execute("SELECT id, name, dir FROM files"):
                 ids.append(fid)
@@ -263,7 +264,7 @@ class NameIndex(object):
             ztab = self.lib.norm.content_map("full")
             pos = dict((fid, k) for k, fid in enumerate(self.f_ids))
             zparts = [""] * len(self.f_ids)
-            c = sqlite3.connect(self.lib.db_path, timeout=30)
+            c = self.lib.open_db()
             for fid, name in c.execute("SELECT id, name FROM files"):
                 k = pos.get(fid)
                 if k is not None:
@@ -380,20 +381,27 @@ class Watcher(object):
 
 
 class Library(object):
-    def __init__(self, db_path, variants_path, helper=None, log=print):
+    def __init__(self, db_path, variants_path, helper=None, log=print, readonly=False):
+        """readonly：只讀打開已有的資料庫（給 MCP 服務等用）——不建表、不掃描、不監聽、不起索引線程。"""
         self.db_path = db_path
         self.variants_path = variants_path
         self.helper = helper if helper and os.path.exists(helper) else None
         self.log = log
+        self.readonly = readonly
+        self._anchor = None
         self.local = threading.local()
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        c = self.conn()
-        c.executescript(SCHEMA)
-        c.commit()
+        if readonly:
+            if not os.path.exists(db_path):
+                raise UserError("找不到通檢的資料庫：%s（請先打開通檢，添加文件夾）" % db_path)
+        else:
+            os.makedirs(os.path.dirname(db_path), exist_ok=True)
+            c = self.conn()
+            c.executescript(SCHEMA)
+            c.commit()
         self.norm = Normalizer(variants_path, self.setting("custom_variants"))
         self.extractor = Extractor(self.helper)
-        # 全文緩存：中文字符串每字 2–4 字節，故上限取 2000 萬字；超長文本不緩存
-        self.text_cache = LRU(20 * 1000 * 1000)
+        # 全文緩存：中文字符串每字 2–4 字節，故上限取 2000 萬字；超長文本不緩存（只讀模式用得少，取 500 萬）
+        self.text_cache = LRU((5 if readonly else 20) * 1000 * 1000)
         self.big_sem = threading.Semaphore(1)     # 大文件逐個抽取，避免多個 PDFKit 進程同時佔用大量內存
         self.thumb_sem = threading.Semaphore(3)
         # 按數據庫分開存放：清理時只會刪本數據庫已不存在的文件的縮略圖
@@ -424,6 +432,8 @@ class Library(object):
         self.pending = set()
         self.pending_lock = threading.Lock()
         self.last_scan_all = 0
+        if readonly:
+            return
         self.worker = threading.Thread(target=self._worker, name="indexer", daemon=True)
         self.worker.start()
         if self.setting("fts_sig") != self.norm_sig():
@@ -432,8 +442,32 @@ class Library(object):
         self.enqueue(("scan", None))
 
     # ------------------------------------------------------------------ 連接與設置
+    def open_db(self):
+        """新開一個連接（不設 row_factory）。只讀模式下以 mode=ro 打開，寫入會被 SQLite 拒絕。"""
+        if not self.readonly:
+            return sqlite3.connect(self.db_path, timeout=30)
+        uri = "file:%s?mode=ro" % urllib.parse.quote(os.path.abspath(self.db_path))
+        try:
+            c = sqlite3.connect(uri, uri=True, timeout=30, check_same_thread=False)
+            c.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchall()
+            return c
+        except sqlite3.OperationalError:
+            # WAL 模式的旁文件（-wal/-shm）不在時只讀打不開：先普通打開一下讓 SQLite 建好旁文件（不寫數據），
+            # 並一直開著，再只讀打開
+            if self._anchor is None:
+                self._anchor = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
+                self._anchor.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchall()
+            c = sqlite3.connect(uri, uri=True, timeout=30, check_same_thread=False)
+            c.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchall()
+            return c
+
     def conn(self):
         c = getattr(self.local, "c", None)
+        if c is None and self.readonly:
+            c = self.open_db()
+            c.row_factory = sqlite3.Row
+            c.execute("PRAGMA busy_timeout=30000")
+            self.local.c = c
         if c is None:
             c = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
             c.row_factory = sqlite3.Row
@@ -1850,8 +1884,9 @@ class Library(object):
                                       % ",".join("?" * len(chunk)), chunk):
                 m[fid]["tags"].append(tid)
 
-    def doc_hits(self, text, q, level, fz=None, cap=20000):
-        """單個文件內的命中：(區間, 模糊命中裡與檢索詞不同的字的位置, 檢索字集)。下標按 UTF-16 計（給瀏覽器用）。"""
+    def doc_hits(self, text, q, level, fz=None, cap=20000, u16=True):
+        """單個文件內的命中：(區間, 模糊命中裡與檢索詞不同的字的位置, 檢索字集)。
+        u16=True 時下標按 UTF-16 計（給瀏覽器用），否則按 Python 碼位。"""
         Q = self._query(q, level, fz)
         spans, ctx = [], {}
         t_end = _now() + 20.0              # 極長的檢索詞配極低的相似度時，最多算 20 秒
@@ -1878,10 +1913,10 @@ class Library(object):
                     ch = text[i]
                     if ch.isalnum() and lm.get(ch, ch) not in ql:
                         diffs.append(i)
-        u16 = u16_mapper(text)
-        if u16:
-            spans = [(u16(a), u16(b)) for a, b in spans]
-            diffs = [u16(i) for i in diffs]
+        conv = u16_mapper(text) if u16 else None
+        if conv:
+            spans = [(conv(a), conv(b)) for a, b in spans]
+            diffs = [conv(i) for i in diffs]
         return spans, diffs, "".join(sorted(Q.qset))
 
     def find_in(self, fid, q, level, fz=None):

@@ -33,6 +33,19 @@ cd tongjian-search
 
 支持全文的格式：txt/md/csv/html/json 等文本（自動識別 UTF-8、GB18030、Big5）、doc/docx/rtf/odt、epub、xlsx、pptx、帶文字層的 PDF。掃描版 PDF 只檢索文件名（側欄「無文字層」可列出）。日誌（.log）不收全文；json/csv/代碼等數據類文本超過 20 MB 只收文件名。
 
+## 給 LLM 用：本地 MCP 服務
+
+`app/tj_mcp.py` 是一個 MCP 服務（stdio），讓 Claude Code 等 LLM 客戶端直接用通檢的索引查資料：簡繁異體互通、可模糊、命中帶頁碼，返回片段而不是整篇，省 token。
+
+```bash
+claude mcp add --scope user tongjian -- /usr/bin/python3 -B /Applications/通檢.app/Contents/Resources/app/tj_mcp.py
+```
+
+- 工具：`search`（檢索，參數同界面：範圍、匹配方式、模糊、文件夾、類型、標籤）、`find_in_file`（一個文件內各處命中的上下文和頁碼）、`read_file`（按頁或按字符位置讀原文）、`list_folder`（資料庫概況、文件夾結構）、`file_info`（含標籤、備註）、`variants`（查簡繁異體）、`list_tags`；寫操作只有 `add_tag`（加／去標籤）和 `append_note`（在備註末尾追加，不覆蓋）。不改名、不移動、不刪除文件。
+- 只讀打開索引數據庫（SQLite `mode=ro`，寫入會被拒絕；兩個寫工具另開連接、用完即關），通檢開不開都能用，與通檢同時運行也沒問題。
+- 由 LLM 客戶端在會話期間啟動，會話結束（標準輸入關閉）即退出；不常駐、不聯網、不需要 API key。空閒兩分鐘釋放緩存。
+- 頁碼是 PDF 的頁序（p.N），不一定是書上印的頁碼。
+
 ## 資源佔用（約 3 萬個文件、3 億多字的資料庫實測）
 
 - 後台服務實際內存（physical footprint）約 30–50 MB，界面（WebKit）60–100 MB；長時間使用不會累積（3000 次混合請求後線程、文件句柄、內存都持平）。
@@ -50,6 +63,7 @@ app/server.py        本地 HTTP 服務（僅 127.0.0.1，帶令牌）
 app/tj_core.py       SQLite 索引（FTS5，每個漢字一個詞元）、掃描線程、檢索、文件操作
 app/tj_norm.py       字形歸一：精確 / 簡繁 / 異體 三級，一字對一字，長度不變
 app/tj_fuzzy.py      模糊檢索：編輯距離近似匹配（Myers 位向量 + 鴿巢原理預篩）
+app/tj_mcp.py        給 LLM 用的本地 MCP 服務（stdio，只讀打開索引）
 app/tj_extract.py    各格式全文抽取
 app/static/          界面（原生 JS/CSS，無構建步驟）
 app/data/variants.json  歸一字表（由 tools/build_variants.py 生成）
