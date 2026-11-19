@@ -19,6 +19,10 @@
   --hl-cur: #f0b443;
   --hl-v: #f6c8b8;
   --hl-v-line: #b5402b;
+  --fz: #2f62b5;
+  --fz-soft: rgba(47, 98, 181, .10);
+  --hl-x: #d7e2f4;
+  --hl-x-line: #2f62b5;
   --shadow-1: 0 1px 2px rgba(40, 30, 10, .06), 0 1px 1px rgba(40, 30, 10, .04);
   --shadow-2: 0 10px 30px rgba(40, 30, 10, .16), 0 2px 8px rgba(40, 30, 10, .08);
   --radius: 10px;
@@ -50,6 +54,10 @@
     --hl-cur: rgba(244, 170, 40, .75);
     --hl-v: rgba(224, 115, 90, .34);
     --hl-v-line: #ef8c74;
+    --fz: #8db2ee;
+    --fz-soft: rgba(141, 178, 238, .14);
+    --hl-x: rgba(110, 150, 230, .30);
+    --hl-x-line: #8db2ee;
     --shadow-1: 0 1px 2px rgba(0, 0, 0, .3);
     --shadow-2: 0 12px 36px rgba(0, 0, 0, .5), 0 2px 8px rgba(0, 0, 0, .3);
     color-scheme: dark;
@@ -182,6 +190,21 @@ svg .fill { fill: currentColor; stroke: none; }
 .seg button:hover { color: var(--text); }
 .seg button.on { background: var(--panel); color: var(--accent); box-shadow: var(--shadow-1); font-weight: 600; }
 .select-wrap { position: relative; flex: none; }
+/* 模糊檢索開關 + 相似度 */
+.fz { display: flex; align-items: center; flex: none; }
+.fz-btn {
+  display: inline-flex; align-items: center; gap: 5px; height: 34px; padding: 0 12px 0 10px; border-radius: 9px;
+  border: 1px solid var(--line-2); background: var(--panel); color: var(--text-2); font-weight: 500;
+  box-shadow: var(--shadow-1); transition: background .15s, color .15s, border-color .15s;
+}
+.fz-btn svg { width: 16px; height: 16px; stroke-width: 1.9; }
+.fz-btn:hover { color: var(--text); }
+.fz.on .fz-btn { color: var(--fz); border-color: var(--fz); background: var(--fz-soft); font-weight: 600;
+  border-radius: 9px 0 0 9px; position: relative; z-index: 1; }
+.fz-sim { display: none; }
+.fz.on .fz-sim { display: block; }
+.fz.on .fz-sim select { border-radius: 0 9px 9px 0; margin-left: -1px; border-color: var(--fz); color: var(--fz);
+  font-variant-numeric: tabular-nums; padding-left: 9px; }
 .select-wrap::after {
   content: ""; position: absolute; right: 10px; top: 50%; width: 6px; height: 6px; margin-top: -5px;
   border-right: 1.6px solid var(--text-3); border-bottom: 1.6px solid var(--text-3);
@@ -287,7 +310,15 @@ select:focus { border-color: var(--accent); }
 mark, .h1, .h2 { color: inherit; border-radius: 2px; }
 .h1 { background: var(--hl); }
 .h2 { background: var(--hl-v); box-shadow: inset 0 -1.5px 0 var(--hl-v-line); }
-.it-name .h1, .it-name .h2 { padding: 0 1px; }
+.h3 { background: var(--hl-x); box-shadow: inset 0 -1.5px 0 var(--hl-x-line); border-radius: 2px; }
+.it-name .h1, .it-name .h2, .it-name .h3 { padding: 0 1px; }
+.it-sim {
+  flex: none; font-size: 11px; color: var(--fz); background: var(--fz-soft); border-radius: 9px;
+  padding: 1px 7px; font-variant-numeric: tabular-nums; font-weight: 600;
+}
+.fz-note { color: var(--fz); cursor: help; }
+.fchip[data-only] > span { cursor: pointer; }
+.side-item.inscope { background: var(--accent-soft); box-shadow: inset 2.5px 0 0 var(--accent); }
 .more-btn {
   display: block; margin: 8px auto 4px; height: 30px; padding: 0 16px; border-radius: 15px;
   border: 1px solid var(--line-2); background: var(--panel); color: var(--text-2);
@@ -372,6 +403,24 @@ mark, .h1, .h2 { color: inherit; border-radius: 2px; }
 .reader mark .v { background: var(--hl-v); box-shadow: inset 0 -2px 0 var(--hl-v-line); border-radius: 2px; }
 .reader mark.cur { background: var(--hl-cur); box-shadow: 0 0 0 2px var(--hl-cur); }
 .reader mark.cur .v { background: transparent; }
+.reader mark .x { background: var(--hl-x); box-shadow: inset 0 -2px 0 var(--hl-x-line); border-radius: 2px; }
+.reader mark.cur .x { background: transparent; }
+/* 本文件內查找 */
+.findbar {
+  display: flex; align-items: center; gap: 8px; padding: 7px 12px 7px 18px; border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+.findbar[hidden] { display: none; }
+.findbar > svg { width: 15px; height: 15px; color: var(--text-3); }
+.findbar input {
+  flex: 1; min-width: 0; height: 28px; padding: 0 9px; border-radius: 7px; border: 1px solid var(--line-2);
+  background: var(--paper); color: var(--text); outline: none; font-size: 13.5px;
+  user-select: text; -webkit-user-select: text;
+}
+.findbar input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.find-mode { font-size: 11px; color: var(--text-3); white-space: nowrap; }
+.findbar .icon-btn { width: 26px; height: 26px; }
+.findbar .icon-btn svg { width: 14px; height: 14px; }
 .reader .trunc { margin-top: 24px; font: 12px var(--ui); color: var(--text-3); text-align: center; }
 .frame { flex: 1; border: 0; width: 100%; background: var(--paper); }
 .img-view { flex: 1; overflow: auto; display: grid; place-items: center; padding: 20px; background: var(--paper); }
@@ -414,7 +463,9 @@ mark, .h1, .h2 { color: inherit; border-radius: 2px; }
 .menu .mi:hover, .menu .mi.focus { background: var(--accent); color: #fff; }
 .menu .mi:hover svg { color: #fff; }
 .menu .mi svg { width: 15px; height: 15px; color: var(--text-2); }
-.menu .mi .k { margin-left: auto; font-size: 11px; opacity: .55; padding-left: 16px; }
+.menu .mi .k { margin-left: auto; font-size: 11px; opacity: .55; padding-left: 16px; white-space: nowrap; flex: none; }
+.menu .mi > span:not(.k):not(.check):not(.tag-dot) { min-width: 0; max-width: 340px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
 .menu .mi.danger { color: #c0392b; }
 .menu .mi.danger:hover { background: #c0392b; color: #fff; }
 .menu .mi.dis { opacity: .4; pointer-events: none; }

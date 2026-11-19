@@ -3,6 +3,7 @@
 import bisect
 import fnmatch
 import hashlib
+import json
 import os
 import queue
 import re
@@ -18,7 +19,8 @@ from collections import OrderedDict, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
 from tj_extract import CODE_EXTS, EXTRACTOR_VERSION, INDEXABLE, Extractor, kind_of
-from tj_norm import Normalizer, is_cjk
+from tj_fuzzy import FuzzyTerm, pieces as fz_pieces
+from tj_norm import CJK_RE_CLASS, Normalizer, is_cjk
 from tj_sort import Collator, system_collation
 
 SCHEMA = """
@@ -56,6 +58,8 @@ DEFAULT_SETTINGS = {
     "code_fulltext": "0",
     "mode": "full",
     "scope": "name",
+    "fuzzy": "0",
+    "fuzzy_sim": "0.7",
 }
 # 含這些文件的文件夾視為代碼項目，整個跳過
 PROJECT_MARKERS = {"package.json", "pyproject.toml", "setup.py", "requirements.txt", "Cargo.toml",
@@ -69,6 +73,7 @@ FS_CREATED, FS_REMOVED, FS_RENAMED = 0x100, 0x200, 0x800
 MAINT_INTERVAL = 24 * 3600                 # 空閒時每天整理一次數據庫與緩存
 THUMB_CACHE_MAX = 300 * 1024 * 1024        # 縮略圖緩存上限
 WS_DELETE = dict.fromkeys(map(ord, " \t\r\n\f\v\u3000"), None)
+ASTRAL_RE = re.compile("[\U00010000-\U0010FFFF]")
 TAG_COLORS = ["#c2412d", "#d98a1c", "#3f8f4f", "#2f7fb3", "#7a55b5", "#b04a85", "#6b6b6b"]
 
 
@@ -101,6 +106,30 @@ def parse_query(q):
             groups.append({"neg": neg, "alts": alts})
         pend_or = False
     return groups
+
+
+def fuzzy_param(p):
+    """請求參數 → 模糊檢索的相似度下限；未開啟時返回 None。"""
+    if p.get("fuzzy") not in ("1", 1, True, "true"):
+        return None
+    try:
+        v = float(p.get("sim") or 0.7)
+    except ValueError:
+        v = 0.7
+    return max(0.4, min(0.95, v))
+
+
+def u16_mapper(text):
+    """Python 按碼位計的下標 → 瀏覽器（UTF-16）下標；文本沒有擴展區字時返回 None。"""
+    ast = [m.start() for m in ASTRAL_RE.finditer(text)]
+    if not ast:
+        return None
+    return lambda i: i + bisect.bisect_left(ast, i)
+
+
+class Query(object):
+    """編譯好的檢索式：正向組（每組若干匹配器：正則或模糊詞）、排除組、高亮用的字集。"""
+    __slots__ = ("groups", "level", "fz", "pos", "neg", "fuzzy", "qset", "qlev", "lmap")
 
 
 class LRU(object):
@@ -167,7 +196,8 @@ class NameIndex(object):
         self.built = 0
         self.f_blob, self.f_starts, self.f_ids = "\n", [], []
         self.d_blob, self.d_starts, self.d_paths = "\n", [], []
-        self.keytab = {}
+        self.z_fblob, self.z_fstarts, self.z_dblob, self.z_dstarts = "\n", [], "\n", []
+        self.keytab = self.ztab = {}
 
     def mark(self):
         self.version += 1
@@ -189,11 +219,13 @@ class NameIndex(object):
                 return
             tab = dict(self.lib.norm.tables["full"])
             tab.update(WS_DELETE)
+            ztab = self.lib.norm.content_map("full")     # 模糊檢索：連標點也去掉
             c = sqlite3.connect(self.lib.db_path, timeout=30)
-            ids, parts, dirs = [], [], set()
+            ids, parts, zparts, dirs = [], [], [], set()
             for fid, name, d in c.execute("SELECT id, name, dir FROM files"):
                 ids.append(fid)
                 parts.append(name.translate(tab))
+                zparts.append(name.translate(ztab))
                 dirs.add(d)
             rootset = set(r[0] for r in c.execute("SELECT path FROM roots"))
             c.close()
@@ -211,7 +243,10 @@ class NameIndex(object):
             self.f_ids = ids
             self.d_blob, self.d_starts = self._join([os.path.basename(p).translate(tab) for p in dpaths])
             self.d_paths = dpaths
+            self.z_fblob, self.z_fstarts = self._join(zparts)
+            self.z_dblob, self.z_dstarts = self._join([os.path.basename(p).translate(ztab) for p in dpaths])
             self.keytab = tab
+            self.ztab = ztab
             self.built = v
 
     @staticmethod
@@ -225,8 +260,9 @@ class NameIndex(object):
             i = blob.find(key, nxt)
         return out
 
-    def candidates(self, groups):
-        """返回 (文件 id 集合, 文件夾路徑集合)；檢索詞無法預篩時返回 None（退回逐條匹配）。"""
+    def candidates(self, groups, fuzzy=None):
+        """返回 (文件 id 集合, 文件夾路徑集合)；檢索詞無法預篩時返回 None（退回逐條匹配）。
+        fuzzy：{檢索詞: FuzzyTerm}，這些詞按鴿巢原理取「任一段原樣出現」的名稱為候選。"""
         self.ensure()
         fs = ds = None
         for g in groups:
@@ -234,13 +270,20 @@ class NameIndex(object):
                 continue
             fids, dps = set(), set()
             for a in g["alts"]:
-                if re.search(r"[0-9A-Za-z][\s\W_]+[0-9A-Za-z]", a.strip()):
-                    return None          # 含空格／標點的西文短語，正則允許間隔，不能用子串預篩
-                key = a.translate(self.keytab)
-                if not key:
-                    return None
-                fids.update(self.f_ids[k] for k in self._find(self.f_blob, self.f_starts, key))
-                dps.update(self.d_paths[k] for k in self._find(self.d_blob, self.d_starts, key))
+                ft = fuzzy.get(a) if fuzzy else None
+                if ft is not None:
+                    keys = [pc for _, pc in fz_pieces(ft.q.translate(self.ztab), ft.maxd)]
+                    blobs = (self.z_fblob, self.z_fstarts, self.z_dblob, self.z_dstarts)
+                else:
+                    if re.search(r"[0-9A-Za-z][\s\W_]+[0-9A-Za-z]", a.strip()):
+                        return None          # 含空格／標點的西文短語，正則允許間隔，不能用子串預篩
+                    keys = [a.translate(self.keytab)]
+                    blobs = (self.f_blob, self.f_starts, self.d_blob, self.d_starts)
+                for key in keys:
+                    if not key:
+                        return None
+                    fids.update(self.f_ids[k] for k in self._find(blobs[0], blobs[1], key))
+                    dps.update(self.d_paths[k] for k in self._find(blobs[2], blobs[3], key))
             fs = fids if fs is None else fs & fids
             ds = dps if ds is None else ds & dps
         return fs, ds
@@ -329,6 +372,7 @@ class Library(object):
         self.thumb_dir = os.path.join(os.path.expanduser("~/Library/Caches/TongJian"), "thumbs-" +
                                       hashlib.sha1(os.path.realpath(db_path).encode("utf-8")).hexdigest()[:10])
         self.regex_cache = {}
+        self.search_gen = ""               # 最近一次檢索請求的編號：舊的、還在跑的檢索見到新編號就提前收工
         self.ver = 1                       # 數據版本：統計結果按版本緩存
         self._cache = {}
         self.names = NameIndex(self)
@@ -980,8 +1024,53 @@ class Library(object):
             ph += " *"
         return ph
 
+    def fts_fuzzy(self, ft):
+        """模糊詞的 FTS 候選式。按詞元（漢字逐字、西文逐詞）分成「錯字數 + 2」段：每處差異至多破壞一段，
+        所以近似出現處至少有兩段原樣保留 → 候選文件須含其中任意兩段（比「任一段」嚴得多，又不會漏）。"""
+        t = self.norm.norm(ft.term, "full")
+        units = re.findall(r"[%s]|[^\W_%s]+" % (CJK_RE_CLASS, CJK_RE_CLASS), t)
+
+        def split(n):
+            return [" ".join(units[i * len(units) // n:(i + 1) * len(units) // n]) for i in range(n)]
+        n = ft.maxd + 2
+        if len(units) >= n:
+            phs = [self.fts_phrase(x) for x in split(n)]
+            if all(phs):
+                return " OR ".join("(%s AND %s)" % (phs[i], phs[j])
+                                   for i in range(n) for j in range(i + 1, n))
+        parts = split(ft.maxd + 1) if len(units) >= ft.maxd + 1 else units
+        phs = [x for x in (self.fts_phrase(x) for x in parts) if x]
+        return " OR ".join(phs) if phs else None
+
+    @staticmethod
+    def scope_set(p):
+        """自選檢索範圍：ids=文件 id（逗號分隔），dirs=文件夾路徑（JSON 數組）。"""
+        ids = []
+        for x in (p.get("ids") or "").split(","):
+            x = x.strip()
+            if x.lstrip("-").isdigit() and int(x) > 0:
+                ids.append(int(x))
+        dirs = []
+        if p.get("dirs"):
+            try:
+                v = json.loads(p["dirs"])
+            except ValueError:
+                v = []
+            dirs = [d.rstrip("/") for d in v if isinstance(d, str) and d.strip("/")]
+        return ids[:5000], dirs[:200]
+
     def _filters(self, p):
         where, args = [], []
+        ids, sdirs = self.scope_set(p)
+        if ids or sdirs:
+            conds = []
+            if ids:
+                conds.append("f.id IN (%s)" % ",".join("?" * len(ids)))
+                args += ids
+            for d in sdirs:
+                conds.append("(f.dir=? OR (f.dir>=? AND f.dir<?))")
+                args += [d, d + "/", d + "0"]
+            where.append("(" + " OR ".join(conds) + ")")
         if p.get("root"):
             where.append("f.root_id=?")
             args.append(int(p["root"]))
@@ -1002,11 +1091,12 @@ class Library(object):
             where.append("f.starred=1")
         return where, args
 
-    def segs(self, text, spans, qset):
-        """把 [s,e) 命中區間切成 [[文字, 類型]]：0 普通，1 命中，2 異體命中。"""
+    def segs(self, text, spans, hl):
+        """把 [s,e) 命中區間切成 [[文字, 類型]]：0 普通，1 命中，2 異體命中，3 模糊命中裡與檢索詞不同的字。"""
         out = []
         pos = 0
         ex = self.norm.maps["exact"]
+        qset, qlev, lm = hl.qset, hl.qlev, hl.lmap
         for s, e in spans:
             if s < pos:
                 s = pos
@@ -1016,7 +1106,12 @@ class Library(object):
                 out.append([text[pos:s], 0])
             cur, kind = [], None
             for ch in text[s:e]:
-                k = 1 if (ex.get(ch, ch) in qset or not ch.strip() or not ch.isalnum()) else 2
+                if ex.get(ch, ch) in qset or not ch.strip() or not ch.isalnum():
+                    k = 1
+                elif qlev is None or lm.get(ch, ch) in qlev:
+                    k = 2
+                else:
+                    k = 3
                 if k != kind and cur:
                     out.append(["".join(cur), kind])
                     cur = []
@@ -1029,33 +1124,65 @@ class Library(object):
             out.append([text[pos:], 0])
         return out
 
-    def _compile(self, groups, level, cross):
-        pos, neg = [], []
-        for g in groups:
-            rxs = [self.term_regex(a, level, cross) for a in g["alts"]]
-            rxs = [r for r in rxs if r is not None]
-            if rxs:
-                (neg if g["neg"] else pos).append(rxs)
-        return pos, neg
+    def _query(self, q, level, fz=None):
+        """檢索式 → Query。fz 為模糊檢索的相似度下限（None = 不模糊）；排除詞和太短的詞仍按原方式匹配。"""
+        Q = Query()
+        Q.groups = parse_query(q.strip()) if isinstance(q, str) else q
+        Q.level = level = level if level in Normalizer.LEVELS else "full"
+        Q.fz = fz
+        Q.fuzzy = {}
+        cross = self.setting("cross_punct") == "1"
+        cmap = self.norm.content_map(level) if fz else None
+        Q.pos, Q.neg = [], []
+        for g in Q.groups:
+            ms = []
+            for a in g["alts"]:
+                if fz and not g["neg"]:
+                    ft = Q.fuzzy.get(a) or FuzzyTerm(a, cmap, fz, lambda ch, lv=level: self.char_class(ch, lv))
+                    if ft.maxd > 0:
+                        Q.fuzzy[a] = ft
+                        ms.append(ft)
+                        continue
+                rx = self.term_regex(a, level, cross)
+                if rx is not None:
+                    ms.append(rx)
+            if ms:
+                (Q.neg if g["neg"] else Q.pos).append(ms)
+        ex = self.norm.maps["exact"]
+        Q.qset = set(ex.get(ch, ch) for g in Q.groups if not g["neg"] for a in g["alts"] for ch in a)
+        Q.lmap = self.norm.maps[level]
+        Q.qlev = set(Q.lmap.get(ch, ch) for ch in Q.qset) if Q.fuzzy else None
+        return Q
 
-    def _match_all(self, text, pos, neg, cap=3000):
-        """全部正向組命中且無排除詞命中時，返回排序後的命中區間；否則 None。"""
+    def _match_all(self, text, pos, neg, cap=3000, info=None):
+        """全部正向組命中且無排除詞命中時，返回排序後的命中區間；否則 None。
+        info 若給出，填入 sim：各組最佳命中相似度的最小值（精確命中為 1）。"""
         for rxs in neg:
             for rx in rxs:
                 if rx.search(text):
                     return None
-        spans = []
+        spans, sims, ctx = [], [], {}
         for rxs in pos:
-            got = False
+            got, best = False, 0.0
             for rx in rxs:
+                if isinstance(rx, FuzzyTerm):
+                    for a, b, d in rx.finditer(text, cap, ctx):
+                        spans.append((a, b))
+                        got = True
+                        best = max(best, 1.0 - float(d) / rx.m)
+                    continue
                 for m in rx.finditer(text):
                     if m.end() > m.start():
                         spans.append((m.start(), m.end()))
                         got = True
+                        best = 1.0
                         if len(spans) >= cap:
                             break
             if not got:
                 return None
+            sims.append(best)
+        if info is not None:
+            info["sim"] = min(sims) if sims else 1.0
         spans.sort()
         merged = []
         for s, e in spans:
@@ -1066,7 +1193,7 @@ class Library(object):
                 merged.append((s, e))
         return merged
 
-    def _snippets(self, text, spans, qset, n=3, before=34, after=70):
+    def _snippets(self, text, spans, hl, n=3, before=34, after=70):
         out = []
         page_starts = None
         if "\f" in text:
@@ -1081,7 +1208,7 @@ class Library(object):
             b = min(len(text), e + after)
             # 窗口內所有命中一起高亮
             inner = [(max(a, x), min(b, y)) for x, y in spans if y > a and x < b]
-            segs = self.segs(text[a:b], [(x - a, y - a) for x, y in inner], qset)
+            segs = self.segs(text[a:b], [(x - a, y - a) for x, y in inner], hl)
             for sg in segs:
                 sg[0] = re.sub(r"\s+", " ", sg[0])
             if a > 0:
@@ -1107,12 +1234,16 @@ class Library(object):
         sort = p.get("sort") or "relevance"
         limit = max(1, min(int(p.get("limit") or 200), 5000))
         cross = self.setting("cross_punct") == "1"
+        fz = fuzzy_param(p)
+        gen = str(p.get("gen") or "")
+        if gen:
+            self.search_gen = gen
         where, args = self._filters(p)
         c = self.conn()
         cols = "f.id, f.root_id, f.name, f.dir, f.ext, f.kind, f.size, f.mtime, f.starred, f.status," \
                " f.pages, f.chars, f.note"
         groups = parse_query(q) if q else []
-        res = {"q": q, "mode": level, "variants": [], "items": [], "truncated": False}
+        res = {"q": q, "mode": level, "fuzzy": fz, "variants": [], "items": [], "truncated": False}
         if not groups:
             order = {"name": "f.name COLLATE NOCASE ASC", "size": "f.size DESC",
                      "mtime_asc": "f.mtime ASC"}.get(sort, "f.mtime DESC")
@@ -1136,9 +1267,9 @@ class Library(object):
                     if is_cjk(ch) and ch not in seen_chars:
                         seen_chars.append(ch)
         res["variants"] = [self.norm.group_info(ch) for ch in seen_chars[:24]]
-        ex = self.norm.maps["exact"]
-        qset = set(ex.get(ch, ch) for g in groups if not g["neg"] for a in g["alts"] for ch in a)
-        pos, neg = self._compile(groups, level, cross)
+        Q = self._query(groups, level, fz)
+        pos, neg = Q.pos, Q.neg
+        res["fuzzy_terms"] = [{"term": a, "chars": ft.m, "errors": ft.maxd} for a, ft in Q.fuzzy.items()]
         if not pos:
             res["took"] = round(_now() - t0, 3)
             res["total"] = 0
@@ -1147,7 +1278,7 @@ class Library(object):
         # ---- 文件名（先在常駐內存的歸一化名稱表裡預篩，再用正則覆核）
         dcand = None
         if scope in ("all", "name"):
-            cand = None if cross else self.names.candidates(groups)
+            cand = None if cross else self.names.candidates(groups, Q.fuzzy)
             if cand is None:
                 sql = "SELECT %s FROM files f %s" % (cols, ("WHERE " + " AND ".join(where)) if where else "")
                 rows = c.execute(sql, args)
@@ -1155,17 +1286,20 @@ class Library(object):
                 fcand, dcand = cand
                 rows = self._name_rows(c, cols, where, args, fcand, sort, limit, res)
             for r in rows:
-                spans = self._match_all(r["name"], pos, neg, cap=50)
+                info = {}
+                spans = self._match_all(r["name"], pos, neg, cap=50, info=info)
                 if spans is not None:
                     it = self._item(r)
-                    it["name_segs"] = self.segs(r["name"], spans, qset)
-                    it["score"] = 1000 + (100 - min(len(r["name"]), 100))
+                    it["name_segs"] = self.segs(r["name"], spans, Q)
+                    it["score"] = 1000 + (100 - min(len(r["name"]), 100)) - 1000 * (1 - info["sim"])
                     it["hits"] = 0
+                    if Q.fuzzy:
+                        it["sim"] = round(info["sim"], 3)
                     found[r["id"]] = it
         # ---- 文件夾名
         if scope in ("all", "name") and not p.get("kind") and not p.get("tag") and \
                 p.get("starred") not in ("1", 1, True, "true"):
-            for it in self._match_folders(c, p, pos, neg, qset, dcand):
+            for it in self._match_folders(c, p, Q, dcand):
                 found[it["id"]] = it
         # ---- 全文
         if scope in ("all", "content"):
@@ -1173,7 +1307,7 @@ class Library(object):
             for g in groups:
                 if g["neg"]:
                     continue
-                phs = [self.fts_phrase(a) for a in g["alts"]]
+                phs = [self.fts_fuzzy(Q.fuzzy[a]) if a in Q.fuzzy else self.fts_phrase(a) for a in g["alts"]]
                 if any(ph is None for ph in phs):
                     continue        # 純標點，FTS 無法表達，交由正則覆核
                 fts_pos.append("(" + " OR ".join(phs) + ")")
@@ -1201,10 +1335,14 @@ class Library(object):
                     if verified >= limit or _now() - t0 > budget:
                         res["truncated"] = True
                         break
+                    if gen and self.search_gen != gen:
+                        res["truncated"] = res["superseded"] = True     # 用戶已輸入新的檢索詞
+                        break
                     text = self.get_text(r["id"])
                     if text is None:
                         continue
-                    spans = self._match_all(text, pos, neg)
+                    info = {}
+                    spans = self._match_all(text, pos, neg, info=info)
                     if spans is None:
                         continue
                     verified += 1
@@ -1215,8 +1353,16 @@ class Library(object):
                         found[r["id"]] = it
                     it["hits"] = len(spans)
                     it["capped"] = len(spans) >= 3000
-                    it["snippets"] = self._snippets(text, spans, qset)
-                    it["score"] += 500.0 * (n - i) / max(n, 1)
+                    it["snippets"] = self._snippets(text, spans, Q)
+                    u16 = u16_mapper(text)
+                    if u16:
+                        for sn in it["snippets"]:
+                            sn["pos"] = u16(sn["pos"])
+                    if Q.fuzzy:
+                        it["score"] += 100.0 * (n - i) / max(n, 1) + 400.0 * info["sim"]
+                        it["sim"] = max(it.get("sim") or 0, round(info["sim"], 3))
+                    else:
+                        it["score"] += 500.0 * (n - i) / max(n, 1)
                 res["candidates"] = n
         items = list(found.values())
         if sort == "relevance":
@@ -1279,20 +1425,26 @@ class Library(object):
             stop.add(p["dir"].rstrip("/"))
         return agg, stop
 
-    def _match_folders(self, c, p, pos, neg, qset, dcand=None):
+    def _match_folders(self, c, p, Q, dcand=None):
         self.names.ensure()
         roots = [(r[0], r[1]) for r in c.execute("SELECT id, path FROM roots")]
         fdir = p["dir"].rstrip("/") if p.get("dir") else None
         froot = int(p["root"]) if p.get("root") else None
+        sids, sdirs = self.scope_set(p)
+        if sids and not sdirs:
+            return []                       # 範圍只有文件，沒有文件夾可列
         out = []
         for path in (sorted(dcand) if dcand is not None else self.names.d_paths):
             if fdir and not path.startswith(fdir + "/"):
+                continue
+            if sdirs and not any(path.startswith(d + "/") for d in sdirs):
                 continue
             rid = self.root_for(path, roots)
             if rid is None or (froot and rid != froot):
                 continue
             name = os.path.basename(path)
-            spans = self._match_all(name, pos, neg, cap=50)
+            info = {}
+            spans = self._match_all(name, Q.pos, Q.neg, cap=50, info=info)
             if spans is None:
                 continue
             n, sz, mt = c.execute("SELECT COUNT(*), SUM(size), MAX(mtime) FROM files WHERE dir=? OR (dir>=? AND dir<?)",
@@ -1306,8 +1458,10 @@ class Library(object):
                         "name": name, "dir": os.path.dirname(path), "path": path, "root": rid, "subs": subs,
                         "count": n, "size": sz or 0, "mtime": mt or 0, "starred": False, "status": 0,
                         "pages": 0, "chars": 0, "note": False, "hits": 0,
-                        "name_segs": self.segs(name, spans, qset),
-                        "score": 2000 + (100 - min(len(name), 100))})
+                        "name_segs": self.segs(name, spans, Q),
+                        "score": 2000 + (100 - min(len(name), 100)) - 1000 * (1 - info["sim"])})
+            if Q.fuzzy:
+                out[-1]["sim"] = round(info["sim"], 3)
             if len(out) >= 300:
                 break
         return out
@@ -1316,7 +1470,7 @@ class Library(object):
 
     # 「恢復默認設置」會重置的項；自定義異體字與排除列表另行勾選
     RESETTABLE = ("cross_punct", "rescan_minutes", "watch", "skip_projects", "code_fulltext", "mode", "scope",
-                  "sort", "collation", "sidebar_w", "list_w", "folder_view")
+                  "sort", "collation", "sidebar_w", "list_w", "folder_view", "fuzzy", "fuzzy_sim")
 
     def reset_settings(self, variants=False, excludes=False):
         keys = list(self.RESETTABLE) + (["custom_variants"] if variants else []) + (["excludes"] if excludes else [])
@@ -1339,22 +1493,16 @@ class Library(object):
     def set_collation(self, name):
         self.coll = Collator(name or system_collation())
 
-    def _name_matcher(self, q, level):
+    def _name_matcher(self, q, level, fz=None):
         """返回 match(name) -> segs 或 None；q 為空時返回 None。"""
-        groups = parse_query((q or "").strip())
-        if not groups:
+        Q = self._query(q or "", level, fz)
+        if not Q.groups or not Q.pos:
             return None
-        level = level if level in Normalizer.LEVELS else "full"
-        pos, neg = self._compile(groups, level, self.setting("cross_punct") == "1")
-        if not pos:
-            return None
-        ex = self.norm.maps["exact"]
-        qset = set(ex.get(ch, ch) for g in groups if not g["neg"] for a in g["alts"] for ch in a)
 
         def match(name):
-            spans = self._match_all(name, pos, neg, cap=50)
-            return self.segs(name, spans, qset) if spans is not None else None
-        match.groups = groups
+            spans = self._match_all(name, Q.pos, Q.neg, cap=50)
+            return self.segs(name, spans, Q) if spans is not None else None
+        match.Q = Q
         return match
 
     def _dir_files(self, c, dirs, limit=None):
@@ -1370,7 +1518,7 @@ class Library(object):
             rows = rows[:limit]
         return [self._item(r) for r in rows]
 
-    def folder(self, path, q="", level="full"):
+    def folder(self, path, q="", level="full", fz=None):
         """文件夾預覽：整棵子樹的文件夾結構（每層附遞歸統計），文件淺層優先帶回；名稱命中檢索詞的標出。"""
         path = os.path.realpath(path).rstrip("/")
         c = self.conn()
@@ -1405,12 +1553,12 @@ class Library(object):
         partial_root = path not in loaded
         if partial_root:                       # 本層文件就超過上限：只帶前一部分
             files = self._dir_files(c, [path], limit=self.TREE_BUDGET)
-        match = self._name_matcher(q, level)
+        match = self._name_matcher(q, level, fz)
         nmatch = 0
         if match:
             have = set(f["id"] for f in files)
             # 未帶回的深層文件裡也找命中（用常駐內存的名稱表預篩）
-            cand = self.names.candidates(match.groups)
+            cand = self.names.candidates(match.Q.groups, match.Q.fuzzy)
             extra = []
             if cand is not None:
                 ids = [i for i in cand[0] if i not in have]
@@ -1448,14 +1596,14 @@ class Library(object):
                 "loaded": not partial_root, "matches": nmatch, "q": q or "",
                 "exists": os.path.isdir(path), "tags": []}
 
-    def folder_files(self, path, q="", level="full"):
+    def folder_files(self, path, q="", level="full", fz=None):
         """展開文件夾時補載它的直接文件。"""
         path = os.path.realpath(path).rstrip("/")
         c = self.conn()
         if self.root_for(path, c.execute("SELECT id, path FROM roots").fetchall()) is None:
             raise UserError("文件夾不在資料庫中")
         files = self._dir_files(c, [path], limit=5000)
-        match = self._name_matcher(q, level)
+        match = self._name_matcher(q, level, fz)
         if match:
             for f in files:
                 sg = match(f["name"])
@@ -1611,7 +1759,45 @@ class Library(object):
                                       % ",".join("?" * len(chunk)), chunk):
                 m[fid]["tags"].append(tid)
 
-    def preview(self, fid, q, level, max_chars=4000000):
+    def doc_hits(self, text, q, level, fz=None, cap=20000):
+        """單個文件內的命中：(區間, 模糊命中裡與檢索詞不同的字的位置, 檢索字集)。下標按 UTF-16 計（給瀏覽器用）。"""
+        Q = self._query(q, level, fz)
+        spans, ctx = [], {}
+        for ms in Q.pos:
+            for rx in ms:
+                if isinstance(rx, FuzzyTerm):
+                    spans += [(a, b) for a, b, _ in rx.finditer(text, cap, ctx)]
+                    continue
+                for m in rx.finditer(text):
+                    if m.end() > m.start():
+                        spans.append((m.start(), m.end()))
+                        if len(spans) > cap:
+                            break
+        spans.sort()
+        diffs = []
+        if Q.fuzzy:
+            lm, ql = Q.lmap, Q.qlev
+            for a, b in spans:
+                for i in range(a, b):
+                    ch = text[i]
+                    if ch.isalnum() and lm.get(ch, ch) not in ql:
+                        diffs.append(i)
+        u16 = u16_mapper(text)
+        if u16:
+            spans = [(u16(a), u16(b)) for a, b in spans]
+            diffs = [u16(i) for i in diffs]
+        return spans, diffs, "".join(sorted(Q.qset))
+
+    def find_in(self, fid, q, level, fz=None):
+        """「在本文件內查找」：只返回命中位置，不重傳全文。"""
+        self.last_use = _now()
+        text = self.get_text(fid)
+        if text is None or not (q or "").strip():
+            return {"spans": [], "diffs": [], "qchars": ""}
+        spans, diffs, qchars = self.doc_hits(text, q, level, fz)
+        return {"spans": spans, "diffs": diffs, "qchars": qchars}
+
+    def preview(self, fid, q, level, max_chars=4000000, fz=None):
         self.last_use = _now()
         c = self.conn()
         r = c.execute("SELECT * FROM files WHERE id=?", (fid,)).fetchone()
@@ -1629,27 +1815,18 @@ class Library(object):
         it["truncated"] = False
         spans = []
         if text is not None:
+            diffs = []
             if q and q.strip():
-                groups = parse_query(q.strip())
-                pos, neg = self._compile(groups, level if level in Normalizer.LEVELS else "full",
-                                         self.setting("cross_punct") == "1")
-                for rxs in pos:
-                    for rx in rxs:
-                        for m in rx.finditer(text):
-                            if m.end() > m.start():
-                                spans.append((m.start(), m.end()))
-                                if len(spans) > 20000:
-                                    break
-                spans.sort()
-                ex = self.norm.maps["exact"]
-                it["qchars"] = "".join(sorted(set(ex.get(ch, ch) for g in groups if not g["neg"]
-                                                  for a in g["alts"] for ch in a)))
+                spans, diffs, it["qchars"] = self.doc_hits(text, q, level, fz)
             if len(text) > max_chars:
                 text = text[:max_chars]
-                spans = [s for s in spans if s[1] <= max_chars]
+                lim = len(text.encode("utf-16-le")) // 2
+                spans = [s for s in spans if s[1] <= lim]
+                diffs = [i for i in diffs if i < lim]
                 it["truncated"] = True
             it["text"] = text
             it["spans"] = spans
+            it["diffs"] = diffs
         return it
 
     # ------------------------------------------------------------------ 字表

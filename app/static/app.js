@@ -48,7 +48,8 @@ const S = {
   token: window.TJ.token, native: window.TJ.native,
   roots: [], tags: [], stats: {}, status: {}, settings: {}, meta: {}, tools: {},
   q: '', mode: 'full', scope: 'name', sort: 'relevance', limit: 200, projects: [],
-  filter: { root: null, dir: null, kind: null, tag: null, starred: false },
+  fuzzy: false, fzSim: '0.7', find: { open: false, q: '', res: null, busy: false },
+  filter: { root: null, dir: null, kind: null, tag: null, starred: false, only: null },
   res: null, items: [], cur: null, sel: new Set(), anchor: null,
   pv: null, pvTab: 'text', pvTabPref: 'text', hit: 0, hitEls: [], pendingPos: null,
   dirs: {}, openRoots: new Set(), openDirs: new Set(),
@@ -71,6 +72,7 @@ async function api(path, body) {
 }
 const rawUrl = (id, hash = '') => `/raw/${id}?t=${encodeURIComponent(S.token)}${hash}`;
 const thumbUrl = id => `/thumb/${id}?t=${encodeURIComponent(S.token)}`;
+const fzQS = () => (S.fuzzy ? `&fuzzy=1&sim=${S.fzSim}` : '');
 const topPv = pv => { while (pv && pv.back) pv = pv.back; return pv; };
 async function openPath(path, reveal) { try { await api('open-path', { path, reveal: !!reveal }); } catch (e) { fail(e); } }
 
@@ -282,7 +284,8 @@ function treeHtml(node, depth, rootId) {
   for (const k of kids) {
     const open = S.openDirs.has(k.path);
     const active = S.filter.dir === k.path;
-    h += `<div class="side-item${active ? ' active' : ''}" data-act="dir" data-root="${rootId}" data-path="${esc(k.path)}"
+    const inScope = S.filter.only && S.filter.only.dirs.includes(k.path);
+    h += `<div class="side-item${active ? ' active' : ''}${inScope ? ' inscope' : ''}" data-act="dir" data-root="${rootId}" data-path="${esc(k.path)}"
       style="padding-left:${8 + depth * 14}px" title="${esc(k.path)}">
       <span class="caret${k.kids.size ? (open ? ' open' : '') : ' none'}" data-act="toggle-dir">${I.chev}</span>
       <span class="side-ic">${I.folder}</span><span class="label">${esc(k.name)}</span><span class="count">${fmtNum(k.count)}</span></div>`;
@@ -292,14 +295,14 @@ function treeHtml(node, depth, rootId) {
 }
 function renderSidebar() {
   const f = S.filter, st = S.stats || {};
-  const noFilter = !f.root && !f.dir && !f.kind && !f.tag && !f.starred;
+  const noFilter = !f.root && !f.dir && !f.kind && !f.tag && !f.starred && !f.only;
   let h = `<div class="brand"><div class="seal">檢</div><div><div class="brand-name">通檢</div>
     <div class="brand-sub">簡繁異體 · 文件檢索</div></div></div><div class="side-scroll">`;
   h += `<div class="side-sec"><div class="side-h"><span>資料庫</span>
     <button class="icon-btn" data-act="add-root" title="添加文件夾">${I.plus}</button></div>`;
   for (const r of S.roots) {
     const open = S.openRoots.has(r.id);
-    h += `<div class="side-item${f.root === r.id && !f.dir ? ' active' : ''}${r.missing ? ' missing' : ''}" data-act="root" data-id="${r.id}" title="${esc(r.path)}${r.missing ? '（未找到，可能是外接磁盤未連接）' : ''}">
+    h += `<div class="side-item${f.root === r.id && !f.dir ? ' active' : ''}${f.only && f.only.dirs.includes(r.path) ? ' inscope' : ''}${r.missing ? ' missing' : ''}" data-act="root" data-id="${r.id}" title="${esc(r.path)}${r.missing ? '（未找到，可能是外接磁盤未連接）' : ''}">
       <span class="caret${open ? ' open' : ''}" data-act="toggle-root">${I.chev}</span>
       <span class="side-ic">${I.folder}</span><span class="label">${esc(r.name)}</span><span class="count">${fmtNum(r.files)}</span></div>`;
     if (open && S.dirs[r.id]) h += treeHtml(buildTree(r, S.dirs[r.id]), 1, r.id);
@@ -358,6 +361,7 @@ async function loadDirs(rid) {
 }
 function setFilter(patch, toggle) {
   const f = S.filter;
+  if (('root' in patch || 'dir' in patch) && !('only' in patch)) f.only = null;   // 點選單個文件夾 = 換掉自選範圍
   if (toggle) {
     for (const k in patch) f[k] = f[k] === patch[k] ? (k === 'starred' ? false : null) : patch[k];
   } else Object.assign(f, patch);
@@ -387,9 +391,15 @@ $('#sidebar').addEventListener('click', async e => {
   if (act === 'new-tag') return newTag();
   if (act === 'settings') return openSettings();
   if (act === 'rescan') { S.lastRescan = Date.now(); await api('rescan', {}); toast('正在重新掃描…'); return setTimeout(poll, 300); }
-  if (act === 'all') return setFilter({ root: null, dir: null, kind: null, tag: null, starred: false });
-  if (act === 'root') return setFilter({ root: +el.dataset.id, dir: null });
-  if (act === 'dir') return setFilter({ root: +el.dataset.root, dir: el.dataset.path });
+  if (act === 'all') return setFilter({ root: null, dir: null, kind: null, tag: null, starred: false, only: null });
+  if (act === 'root') {
+    if (e.metaKey || e.ctrlKey) { const r = rootOf(+el.dataset.id); return r && scopeToggleDir(r.path); }
+    return setFilter({ root: +el.dataset.id, dir: null });
+  }
+  if (act === 'dir') {
+    if (e.metaKey || e.ctrlKey) return scopeToggleDir(el.dataset.path);
+    return setFilter({ root: +el.dataset.root, dir: el.dataset.path });
+  }
   if (act === 'starred') return setFilter({ starred: true }, true);
   if (act === 'kind') return setFilter({ kind: el.dataset.kind }, true);
   if (act === 'tag') return setFilter({ tag: +el.dataset.id }, true);
@@ -402,6 +412,8 @@ $('#sidebar').addEventListener('contextmenu', e => {
     e.preventDefault();
     const r = rootOf(+el.dataset.id);
     showMenu(e.clientX, e.clientY, [
+      { label: '加入檢索範圍', icon: 'plus', key: '⌘點擊', act: () => scopeAdd({ dirs: [r.path] }) },
+      { sep: true },
       { label: '重新掃描', icon: 'refresh', act: async () => { await api('rescan', { root: r.id }); setTimeout(poll, 300); } },
       { label: '在訪達中顯示', icon: 'reveal', act: () => api('reveal-path', { path: r.path }).catch(fail) },
       { sep: true },
@@ -412,6 +424,9 @@ $('#sidebar').addEventListener('contextmenu', e => {
     const p = el.dataset.path;
     const cnt = +(($('.count', el) || {}).textContent || '0').replace(/,/g, '');
     showMenu(e.clientX, e.clientY, [
+      { label: '只看此文件夾', icon: 'search', act: () => setFilter({ root: +el.dataset.root, dir: p }) },
+      { label: '加入檢索範圍', icon: 'plus', key: '⌘點擊', act: () => scopeAdd({ dirs: [p] }) },
+      { sep: true },
       { label: '在訪達中顯示', icon: 'reveal', act: () => api('reveal-path', { path: p }).catch(fail) },
       { label: '拷貝路徑', icon: 'copy', act: () => copyText(p) },
       { sep: true },
@@ -492,8 +507,13 @@ function scheduleSearch(ms = 230) { clearTimeout(searchTimer); searchTimer = set
 async function runSearch(opt = {}) {
   clearTimeout(searchTimer);
   const seq = ++searchSeq;
-  const p = new URLSearchParams({ q: S.q, mode: S.mode, scope: S.scope, sort: S.sort, limit: S.limit });
+  const p = new URLSearchParams({ q: S.q, mode: S.mode, scope: S.scope, sort: S.sort, limit: S.limit, gen: seq });
+  if (S.fuzzy) { p.set('fuzzy', 1); p.set('sim', S.fzSim); }
   const f = S.filter;
+  if (f.only) {
+    if (f.only.files.length) p.set('ids', f.only.files.map(x => x.id).join(','));
+    if (f.only.dirs.length) p.set('dirs', JSON.stringify(f.only.dirs));
+  }
   if (f.root) p.set('root', f.root);
   if (f.dir) p.set('dir', f.dir);
   if (f.kind) p.set('kind', f.kind);
@@ -506,7 +526,7 @@ async function runSearch(opt = {}) {
   clearTimeout(slow);
   if (seq !== searchSeq) return;
   S.loading = false;
-  const qChanged = !S.res || S.res.q !== r.q || S.res.mode !== r.mode;
+  const qChanged = !S.res || S.res.q !== r.q || S.res.mode !== r.mode || S.res.fuzzy !== r.fuzzy;
   S.res = r;
   S.items = r.items;
   if (!S.items.some(i => i.id === S.cur)) {
@@ -547,6 +567,12 @@ function renderResHead() {
       h += `<span><b>${fmtNum(r.items.length)}</b> 個文件`;
       if (r.hits) h += ` · 命中 <b>${fmtNum(r.hits)}</b> 處`;
       h += ` · ${r.took < 0.01 ? '<0.01' : r.took.toFixed(2)} 秒</span>`;
+      if (r.fuzzy) {
+        const ft = r.fuzzy_terms || [];
+        const tip = ft.length ? '模糊匹配（空白、標點不計）：\n' + ft.map(t => `「${t.term}」${t.chars} 字，最多可差 ${t.errors} 字`).join('\n')
+          : '檢索詞都不足 3 字（或相似度設得太高），按原方式匹配';
+        h += `<span class="fz-note" title="${esc(tip)}">≈ ${ft.length ? '模糊 ≥ ' + Math.round(r.fuzzy * 100) + '%' : '詞太短，未模糊'}</span>`;
+      }
     } else {
       h += `<span><b>${fmtNum(r.total)}</b> 個文件</span>`;
     }
@@ -557,11 +583,14 @@ function renderResHead() {
   if (f.kind) chips.push(['kind', f.kind === 'notext' ? '無文字層' : KIND_LABEL[f.kind]]);
   if (f.tag) { const t = S.tags.find(t => t.id === f.tag); chips.push(['tag', '#' + (t ? t.name : '')]); }
   if (f.starred) chips.push(['starred', '已收藏']);
-  h += chips.map(([k, l]) => `<span class="fchip"><span>${esc(l)}</span><button data-clear="${k}" title="取消篩選">${I.x}</button></span>`).join('');
+  if (f.only) chips.push(['only', '範圍：' + onlyLabel(f.only)]);
+  h += chips.map(([k, l]) => `<span class="fchip"${k === 'only' ? ' data-only title="只在這些文件／文件夾中檢索（點擊查看）"' : ''}><span>${esc(l)}</span><button data-clear="${k}" title="取消篩選">${I.x}</button></span>`).join('');
   $('#res-head').innerHTML = h;
 }
 $('#res-head').addEventListener('click', e => {
   const b = e.target.closest('[data-clear]');
+  const oc = e.target.closest('[data-only]');
+  if (oc && !b) return onlyMenu(oc);
   if (!b) return;
   const k = b.dataset.clear;
   if (k === 'root') setFilter({ root: null, dir: null });
@@ -569,13 +598,15 @@ $('#res-head').addEventListener('click', e => {
   else setFilter({ [k]: k === 'starred' ? false : null });
 });
 
+const simBadge = it => (it.sim != null && it.sim < 1 ?
+  `<span class="it-sim" title="最接近的一處與檢索詞的相似度（模糊匹配）">≈${Math.round(it.sim * 100)}%</span>` : '');
 function itemHtml(it) {
   const sel = S.sel.has(it.id);
   if (it.folder) {
     return `<div class="item${it.id === S.cur ? ' sel' : ''}${sel && S.sel.size > 1 ? ' multi' : ''}" data-id="${it.id}">
       <div class="it-top"><span class="badge k-folder">${I.folder}</span>
       <div class="it-name" title="${esc(it.path)}">${it.name_segs ? segsHtml(it.name_segs) : esc(it.name)}</div>
-      <span class="it-hits it-count" title="文件夾內的文件數">${fmtNum(it.count)} 個文件</span></div>
+      ${simBadge(it)}<span class="it-hits it-count" title="文件夾內的文件數">${fmtNum(it.count)} 個文件</span></div>
       <div class="it-meta"><span class="it-path" title="${esc(it.dir)}">${esc(relDir(it))}</span>
       ${it.subs ? `<span>${fmtNum(it.subs)} 個子文件夾</span><span class="sep">·</span>` : ''}
       <span>${fmtSize(it.size)}</span><span class="sep">·</span><span>${fmtDate(it.mtime)}</span></div></div>`;
@@ -585,7 +616,7 @@ function itemHtml(it) {
     <div class="it-top"><span class="badge k-${it.kind}">${esc(badgeText(it))}</span>
     <div class="it-name" title="${esc(it.name)}">${it.name_segs ? segsHtml(it.name_segs) : esc(it.name)}</div>
     ${it.starred ? `<span class="it-star" title="已收藏">${I.starFill}</span>` : ''}
-    ${it.hits ? `<span class="it-hits" title="全文命中">${fmtNum(it.hits)}${it.capped ? '+' : ''}</span>` : ''}</div>
+    ${simBadge(it)}${it.hits ? `<span class="it-hits" title="全文命中">${fmtNum(it.hits)}${it.capped ? '+' : ''}</span>` : ''}</div>
     <div class="it-meta"><span class="it-path" title="${esc(it.dir)}">${esc(relDir(it))}</span>
     ${tags.length ? `<span class="it-tags">${tags.map(t => `<span class="tag-dot" title="${esc(t.name)}" style="background:${esc(t.color)}"></span>`).join('')}</span>` : ''}
     <span>${fmtSize(it.size)}</span><span class="sep">·</span><span>${fmtDate(it.mtime)}</span></div>`;
@@ -615,6 +646,7 @@ function renderResults() {
     if (r && r.q) {
       list.innerHTML = `<div class="empty">${I.search.replace('<svg', '<svg class="big-ic"')}<h3>沒有找到「${esc(r.q)}」</h3>
         ${S.mode !== 'full' ? `<p>試試切換到「<a href="#" data-mode-to="full">異體</a>」模式</p>` : ''}
+        ${!S.fuzzy ? `<p>或開啟「<a href="#" data-fuzzy-on>模糊</a>」，容許脫字、訛字</p>` : ''}
         ${S.scope !== 'all' ? '<p>或把範圍改為「名稱與全文」</p>' : ''}
         ${Object.values(S.filter).some(Boolean) ? '<p>或取消上方的篩選條件</p>' : ''}
         ${S.status.busy ? '<p>索引尚未完成，稍後結果會更多</p>' : ''}</div>`;
@@ -660,6 +692,7 @@ $('#res-list').addEventListener('click', e => {
   if (e.target.closest('[data-act="more"]')) { S.limit += 300; return runSearch({ keepScroll: true }); }
   const mt = e.target.closest('[data-mode-to]');
   if (mt) { e.preventDefault(); return setMode(mt.dataset.modeTo); }
+  if (e.target.closest('[data-fuzzy-on]')) { e.preventDefault(); return setFuzzy(true); }
   const el = e.target.closest('.item');
   if (!el) return;
   const id = +el.dataset.id;
@@ -704,6 +737,7 @@ function itemMenu(x, y) {
       { label: '在訪達中打開', icon: 'open', key: '↩', act: () => openPath(f.path) },
       { label: '在訪達中顯示', icon: 'reveal', key: '⌘R', act: () => openPath(f.path, true) },
       { label: '只看此文件夾', icon: 'search', act: () => setFilter({ root: f.root, dir: f.path }) },
+      { label: '加入檢索範圍', icon: 'plus', act: () => scopeAdd({ dirs: [f.path] }) },
       { label: '拷貝路徑', icon: 'copy', act: () => copyText(f.path) },
       { sep: true },
       { label: '排除此文件夾…', icon: 'ban', danger: true, act: () => excludeFolder(f.path, f.count) },
@@ -713,11 +747,16 @@ function itemMenu(x, y) {
   if (!n) return;
   const one = n === 1 ? S.items.find(i => i.id === ids[0]) : null;
   const allStar = selItems().every(i => i.starred);
+  const sc = selScope(), ns = sc.files.length + sc.dirs.length;
   showMenu(x, y, [
     one && { label: '打開', icon: 'open', key: '↩', act: () => doOpen(one.id) },
     one && { label: '快速查看', icon: 'eye', key: '空格', act: () => api('quicklook', { id: one.id }).catch(fail) },
     one && { label: '在訪達中顯示', icon: 'reveal', key: '⌘R', act: () => doReveal(one.id) },
     one && { sep: true },
+    { label: ns > 1 ? `只在選中的 ${ns} 項中檢索` : '只在此文件中檢索', icon: 'search', act: () => scopeTo(sc) },
+    { label: '加入檢索範圍', icon: 'plus', act: () => scopeAdd(sc) },
+    one && S.pv && S.pv.id === one.id && S.pv.status === 1 && { label: '在本文件內查找…', icon: 'search', key: '⌘F', act: () => openFind() },
+    { sep: true },
     { label: allStar ? '取消收藏' : '收藏', icon: 'star', key: '⌘D', act: () => doStar(ids, !allStar) },
     { label: '標籤…', icon: 'tag', act: () => tagMenu(x + 10, y + 10, ids) },
     { sep: true },
@@ -736,6 +775,63 @@ function tagMenu(x, y, ids) {
     ...S.tags.map(t => ({ label: t.name, dot: t.color, check: has(t), act: () => doTag(ids, t.id, !has(t)) })),
     S.tags.length ? { sep: true } : null,
     { label: '新建標籤…', icon: 'plus', act: () => newTag(ids) },
+  ]);
+}
+
+// ===================================================================== 自選檢索範圍
+// filter.only = { files: [{id, name}], dirs: [path] }：只在這些文件、文件夾（含子文件夾）中檢索
+function onlyLabel(o) {
+  if (o.files.length + o.dirs.length === 1) return o.files.length ? o.files[0].name : o.dirs[0].split('/').pop();
+  return [o.dirs.length ? `${o.dirs.length} 個文件夾` : '', o.files.length ? `${o.files.length} 個文件` : '']
+    .filter(Boolean).join('、');
+}
+function selScope() {
+  const items = selItems();
+  if (!items.length && S.pv && !S.pv.folder) return { files: [{ id: S.pv.id, name: S.pv.name }], dirs: [] };
+  return { files: items.filter(i => !i.folder).map(i => ({ id: i.id, name: i.name })),
+    dirs: items.filter(i => i.folder).map(i => i.path) };
+}
+function scopeBase() {            // 已有的單個文件夾篩選併入範圍
+  const f = S.filter;
+  if (f.only) return { files: f.only.files.slice(), dirs: f.only.dirs.slice() };
+  const o = { files: [], dirs: [] };
+  if (f.dir) o.dirs.push(f.dir);
+  else if (f.root) { const r = rootOf(f.root); if (r) o.dirs.push(r.path); }
+  return o;
+}
+function applyScope(o) {
+  if (!o.files.length && !o.dirs.length) return setFilter({ only: null });
+  if (o.files.length + o.dirs.length > 2000) return toast('範圍內的項目太多（最多 2000 個）', { err: true });
+  setFilter({ root: null, dir: null, only: o });
+}
+function scopeTo(sc) { applyScope({ files: (sc.files || []).slice(), dirs: (sc.dirs || []).slice() }); }
+function scopeAdd(sc) {
+  const o = scopeBase();
+  for (const x of sc.files || []) if (!o.files.some(y => y.id === x.id)) o.files.push(x);
+  for (const d of sc.dirs || []) if (!o.dirs.includes(d)) o.dirs.push(d);
+  applyScope(o);
+}
+function scopeToggleDir(path) {
+  const o = scopeBase();
+  const i = o.dirs.indexOf(path);
+  if (i >= 0) o.dirs.splice(i, 1); else o.dirs.push(path);
+  applyScope(o);
+}
+function onlyMenu(el) {
+  const o = S.filter.only;
+  if (!o) return;
+  const r = el.getBoundingClientRect();
+  const MAX = 40;
+  const rows = o.dirs.map(d => ({ label: d.split('/').pop(), icon: 'folder', key: '移除',
+    act: () => applyScope({ files: o.files, dirs: o.dirs.filter(x => x !== d) }) }))
+    .concat(o.files.map(x => ({ label: x.name, icon: 'file', key: '移除',
+      act: () => applyScope({ files: o.files.filter(y => y.id !== x.id), dirs: o.dirs }) })));
+  showMenu(r.left, r.bottom + 4, [
+    { header: '只在這些項目中檢索（點擊移除）' },
+    ...rows.slice(0, MAX),
+    rows.length > MAX ? { label: `……還有 ${rows.length - MAX} 項`, disabled: true } : null,
+    { sep: true },
+    { label: '清除範圍', icon: 'x', act: () => setFilter({ only: null }) },
   ]);
 }
 
@@ -901,7 +997,7 @@ let pvSeq = 0;
 async function loadFolder(path, back) {
   const seq = ++pvSeq;
   try {
-    const r = await api(`folder?path=${encodeURIComponent(path)}&q=${encodeURIComponent(S.q)}&mode=${S.mode}`);
+    const r = await api(`folder?path=${encodeURIComponent(path)}&q=${encodeURIComponent(S.q)}&mode=${S.mode}${fzQS()}`);
     if (seq !== pvSeq) return;
     r.back = back || null;
     prepFolder(r);
@@ -918,7 +1014,7 @@ async function loadPreview(id, back) {
   }
   const seq = ++pvSeq;
   try {
-    const r = await api(`preview?id=${id}&q=${encodeURIComponent(S.q)}&mode=${S.mode}`);
+    const r = await api(`preview?id=${id}&q=${encodeURIComponent(S.q)}&mode=${S.mode}${fzQS()}`);
     if (seq !== pvSeq) return;
     r.back = back || null;
     S.pv = r;
@@ -1129,7 +1225,7 @@ async function loadMoreFiles(f, path) {
   d.loading = true;
   rerenderFolder();
   try {
-    const r = await api(`folder-files?path=${encodeURIComponent(path)}&q=${encodeURIComponent(f.q)}&mode=${S.mode}`);
+    const r = await api(`folder-files?path=${encodeURIComponent(path)}&q=${encodeURIComponent(f.q)}&mode=${S.mode}${fzQS()}`);
     f.kidFiles.set(path, r.files);
     d.loaded = true;
   } catch (e) { fail(e); }
@@ -1231,34 +1327,54 @@ function mergeSpans(spans) {
   }
   return out;
 }
-function fillMark(m, str, qset) {
-  let run = '', runV = null;
+function fillMark(m, str, qset, base, diffs) {
+  // 命中裡字形與檢索詞不同的字：v = 異體，x = 模糊匹配中與檢索詞不同的字（diffs 為 UTF-16 下標）
+  let run = '', runK = null, i = base;
   const flush = () => {
     if (!run) return;
-    if (runV) { const sp = document.createElement('span'); sp.className = 'v'; sp.textContent = run; m.appendChild(sp); }
+    if (runK) { const sp = document.createElement('span'); sp.className = runK; sp.textContent = run; m.appendChild(sp); }
     else m.appendChild(document.createTextNode(run));
     run = '';
   };
   for (const ch of str) {
-    const v = isWordChar(ch) && !qset.has(exNorm(ch));
-    if (runV !== null && v !== runV) flush();
-    runV = v;
+    const k = diffs && diffs.has(i) ? 'x' : (isWordChar(ch) && !qset.has(exNorm(ch)) ? 'v' : '');
+    if (runK !== null && k !== runK) flush();
+    runK = k;
     run += ch;
+    i += ch.length;
   }
   flush();
 }
+function findActive() { return S.find.open && !!S.find.q.trim(); }
+const findKey = () => [S.find.q.trim(), S.mode, S.fuzzy ? S.fzSim : ''].join('\u0001');
+function findReady() { const r = S.find.res; return !!(r && S.pv && r.id === S.pv.id && r.key === findKey()); }
 function renderReader(body) {
   const pv = S.pv;
   if (pv.status !== 1 || pv.text == null) {
     body.innerHTML = `<div class="pv-msg">${statusMsg(pv)}${pv.kind === 'pdf' && pv.exists ? `<br><button class="btn" data-tab-to="orig">${I.page}查看原件</button>` : ''}</div>`;
     return;
   }
-  const spans = mergeSpans(pv.spans);
+  body.innerHTML = `<div class="findbar" id="findbar"${S.find.open ? '' : ' hidden'}>${I.search}
+    <input id="find-q" type="text" spellcheck="false" autocomplete="off" placeholder="在本文件內查找 —— 簡繁異體互通" value="${esc(S.find.q)}">
+    <span class="find-mode" id="find-mode"></span>
+    <button class="icon-btn" data-act="find-close" title="關閉查找（esc）">${I.x}</button></div>
+    <div class="hitbar" id="hitbar"></div><div class="reader" id="reader" style="--reader-size:${S.readerSize}px"></div>`;
+  bindFind();
+  paintReader();
+  if (findActive() && !findReady()) runFind();
+}
+function paintReader() {
+  const pv = S.pv, reader = $('#reader');
+  if (!pv || !reader || pv.text == null) return;
+  // 查找框有內容時，高亮查找結果；否則高亮主檢索詞
+  const src = findActive() ? (findReady() ? S.find.res : { spans: [], diffs: [], qchars: '' }) : pv;
+  const spans = mergeSpans(src.spans);
+  const diffs = src.diffs && src.diffs.length ? new Set(src.diffs) : null;
   S.spans = spans;
+  S.hit = 0;
+  reader.textContent = '';
   const paged = pv.text.indexOf('\f') >= 0;
-  body.innerHTML = `<div class="hitbar" id="hitbar"></div><div class="reader" id="reader" style="--reader-size:${S.readerSize}px"></div>`;
-  const reader = $('#reader', body);
-  const text = pv.text, qset = new Set(Array.from(pv.qchars || ''));
+  const text = pv.text, qset = new Set(Array.from(src.qchars || ''));
   const blocks = [];
   if (paged) {
     let a = 0, page = 1;
@@ -1300,7 +1416,7 @@ function renderReader(body) {
       if (ee > ss) {
         const m = document.createElement('mark');
         m.dataset.i = si;
-        fillMark(m, text.slice(ss, ee), qset);
+        fillMark(m, text.slice(ss, ee), qset, ss, diffs);
         div.appendChild(m);
         if (!S.hitEls[si]) S.hitEls[si] = m;
       }
@@ -1321,6 +1437,69 @@ function renderReader(body) {
   renderHitbar();
   if (spans.length) requestAnimationFrame(() => gotoHit(start));
 }
+// ---- 本文件內查找（⌘F）：與主檢索框無關，用同樣的匹配方式和模糊設置
+let findTimer = null, findSeq = 0;
+function bindFind() {
+  const inp = $('#find-q');
+  if (!inp) return;
+  $('#find-mode').textContent = MODE_LABEL[S.mode] + (S.fuzzy ? ` · 模糊 ≥ ${Math.round(S.fzSim * 100)}%` : '');
+  let comp = false;
+  inp.addEventListener('compositionstart', () => { comp = true; });
+  inp.addEventListener('compositionend', () => { comp = false; onFindInput(); });
+  inp.addEventListener('input', e => { if (!comp && !e.isComposing) onFindInput(); });
+  inp.addEventListener('keydown', e => {
+    if (e.isComposing || comp) return;
+    if (e.key === 'Enter') { e.preventDefault(); gotoHit(S.hit + (e.shiftKey ? -1 : 1)); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeFind(); }
+  });
+}
+function onFindInput() {
+  S.find.q = $('#find-q').value;
+  clearTimeout(findTimer);
+  findTimer = setTimeout(runFind, S.find.q.trim() ? 220 : 0);
+}
+async function runFind() {
+  clearTimeout(findTimer);
+  const pv = S.pv;
+  if (!pv || pv.folder || pv.status !== 1) return;
+  if (!S.find.q.trim()) { S.find.res = null; S.find.busy = false; findSeq++; return paintReader(); }
+  const seq = ++findSeq, key = findKey();
+  S.find.busy = true;
+  renderHitbar();
+  try {
+    const r = await api(`find?id=${pv.id}&q=${encodeURIComponent(S.find.q)}&mode=${S.mode}${fzQS()}`);
+    if (seq !== findSeq || !S.pv || S.pv.id !== pv.id) return;
+    S.find.res = { id: pv.id, key, spans: r.spans, diffs: r.diffs, qchars: r.qchars };
+    S.find.busy = false;
+    paintReader();
+  } catch (e) {
+    if (seq === findSeq) { S.find.busy = false; renderHitbar(); }
+    fail(e);
+  }
+}
+function openFind() {
+  const pv = S.pv;
+  if (!pv || pv.folder || pv.status !== 1 || pv.text == null) return false;
+  if (S.pvTab !== 'text') { S.pvTab = S.pvTabPref = 'text'; renderPreviewBody(); }
+  S.find.open = true;
+  const fb = $('#findbar');
+  if (fb) fb.hidden = false;
+  const inp = $('#find-q');
+  if (inp) { inp.focus(); inp.select(); }
+  renderHitbar();
+  if (S.find.q.trim() && !findReady()) runFind();
+  else if (S.find.q.trim()) paintReader();
+  return true;
+}
+function closeFind() {
+  S.find.open = false;
+  S.find.res = null;
+  S.find.busy = false;
+  findSeq++;
+  const fb = $('#findbar');
+  if (fb) fb.hidden = true;
+  paintReader();
+}
 function curPage() {
   const m = S.hitEls[S.hit];
   const blk = m && m.closest('.blk');
@@ -1329,15 +1508,19 @@ function curPage() {
 function renderHitbar() {
   const hb = $('#hitbar');
   if (!hb) return;
-  const n = S.hitEls.length, pv = S.pv;
+  const n = S.hitEls.length, pv = S.pv, fa = findActive();
   const page = n ? curPage() : null;
-  hb.innerHTML = `${n ? `<span>第 <b>${S.hit + 1}</b> / ${fmtNum(n)} 處</span>
+  const msg = fa ? (S.find.busy || !findReady() ? '查找中…' : '本文件內沒有找到')
+    : `${fmtNum(pv.chars)} 字${pv.pages ? ' · ' + pv.pages + ' 頁' : ''}${S.q ? ' · 正文無命中' : ''}`;
+  hb.innerHTML = `${n ? `<span>${fa ? '查找：' : ''}第 <b>${S.hit + 1}</b> / ${fmtNum(n)} 處</span>
     <button class="icon-btn" data-act="prev-hit" title="上一處（⇧⌘G）">${I.up}</button>
     <button class="icon-btn" data-act="next-hit" title="下一處（⌘G）">${I.down}</button>
     ${page ? `<span class="pg-now">第 ${page} 頁</span>` : ''}` :
-    `<span style="color:var(--text-3)">${fmtNum(pv.chars)} 字${pv.pages ? ' · ' + pv.pages + ' 頁' : ''}${S.q ? ' · 正文無命中' : ''}</span>`}
+    `<span style="color:var(--text-3)">${msg}</span>`}
     <span class="grow"></span>
-    ${pv.kind === 'pdf' && pv.exists ? `<button class="icon-btn" data-act="orig-page" title="在原件中查看${page ? '此頁' : ''}">${I.page}</button><span class="vsep"></span>` : ''}
+    <button class="icon-btn${S.find.open ? ' on' : ''}" data-act="find" title="在本文件內查找（⌘F）">${I.search}</button>
+    ${pv.kind === 'pdf' && pv.exists ? `<button class="icon-btn" data-act="orig-page" title="在原件中查看${page ? '此頁' : ''}">${I.page}</button>` : ''}
+    <span class="vsep"></span>
     <button class="icon-btn" data-act="font-down" title="縮小字號" style="font-size:12px;font-weight:600">A</button>
     <button class="icon-btn" data-act="font-up" title="放大字號" style="font-size:16px;font-weight:600">A</button>`;
 }
@@ -1431,6 +1614,8 @@ $('#preview').addEventListener('click', async e => {
     case 'new-tag-pv': return newTag([id]).then(() => { S.pv.tags = (S.items.find(i => i.id === id) || {}).tags || S.pv.tags; loadPreview(id); });
     case 'prev-hit': return gotoHit(S.hit - 1);
     case 'next-hit': return gotoHit(S.hit + 1);
+    case 'find': return S.find.open ? closeFind() : openFind();
+    case 'find-close': return closeFind();
     case 'orig-page': S.origPage = curPage(); S.pvTab = S.pvTabPref = 'orig'; return renderPreviewBody();
     case 'font-up': case 'font-down': {
       S.readerSize = Math.max(12, Math.min(28, S.readerSize + (b.dataset.act === 'font-up' ? 1 : -1)));
@@ -1453,6 +1638,7 @@ $('#preview').addEventListener('contextmenu', e => {
       { label: '進入此文件夾', icon: 'folder', act: () => loadFolder(p, f) },
       { label: '在訪達中打開', icon: 'open', act: () => openPath(p) },
       { label: '只看此文件夾', icon: 'search', act: () => setFilter({ root: f.root, dir: p }) },
+      { label: '加入檢索範圍', icon: 'plus', act: () => scopeAdd({ dirs: [p] }) },
       { label: '拷貝路徑', icon: 'copy', act: () => copyText(p) },
       { sep: true },
       { label: '排除此文件夾…', icon: 'ban', danger: true, act: () => excludeFolder(p, d.count) },
@@ -1463,6 +1649,7 @@ $('#preview').addEventListener('contextmenu', e => {
   showMenu(e.clientX, e.clientY, [
     { label: '預覽', icon: 'page', act: () => loadPreview(id, f) },
     { label: '打開', icon: 'open', act: () => doOpen(id) },
+    { label: '加入檢索範圍', icon: 'plus', act: () => scopeAdd({ files: [{ id, name: x.name || '' }] }) },
     { label: '快速查看', icon: 'eye', act: () => api('quicklook', { id }).catch(fail) },
     { label: '在訪達中顯示', icon: 'reveal', act: () => doReveal(id) },
     { label: '拷貝路徑', icon: 'copy', act: () => copyText((x.dir || '') + '/' + (x.name || '')) },
@@ -1489,7 +1676,7 @@ function onQuery() {
   S.q = qEl.value;
   $('#q-clear').hidden = !S.q;
   S.limit = 200;
-  scheduleSearch(S.q.trim() ? 260 : 60);
+  scheduleSearch(S.q.trim() ? (S.fuzzy && S.scope !== 'name' ? 450 : 260) : 60);
 }
 qEl.addEventListener('keydown', e => {
   if (e.isComposing || composing) return;
@@ -1501,6 +1688,9 @@ $('#q-clear').onclick = () => { qEl.value = ''; onQuery(); qEl.focus(); };
 function setMode(m) {
   S.mode = m;
   $$('#mode button').forEach(b => b.classList.toggle('on', b.dataset.mode === m));
+  const fm = $('#find-mode');
+  if (fm) fm.textContent = MODE_LABEL[S.mode] + (S.fuzzy ? ` · 模糊 ≥ ${Math.round(S.fzSim * 100)}%` : '');
+  if (findActive()) runFind();
   api('settings', { mode: m }).catch(() => {});
   runSearch({ keepScroll: true });
 }
@@ -1508,6 +1698,24 @@ $('#mode').addEventListener('click', e => { const b = e.target.closest('[data-mo
 $('#scope').onchange = e => { S.scope = e.target.value; api('settings', { scope: S.scope }).catch(() => {}); runSearch(); };
 $('#sort').onchange = e => { S.sort = e.target.value; api('settings', { sort: S.sort }).catch(() => {}); runSearch(); };
 $('#help-btn').onclick = showHelp;
+function renderFuzzy() {
+  $('#fz').classList.toggle('on', S.fuzzy);
+  $('#fz-btn').setAttribute('aria-pressed', S.fuzzy ? 'true' : 'false');
+  $('#fz-sim').value = S.fzSim;
+  const fm = $('#find-mode');
+  if (fm) fm.textContent = MODE_LABEL[S.mode] + (S.fuzzy ? ` · 模糊 ≥ ${Math.round(S.fzSim * 100)}%` : '');
+}
+function setFuzzy(on, sim) {
+  S.fuzzy = !!on;
+  if (sim) S.fzSim = sim;
+  renderFuzzy();
+  api('settings', { fuzzy: S.fuzzy ? '1' : '0', fuzzy_sim: S.fzSim }).catch(() => {});
+  S.limit = 200;
+  runSearch({ keepScroll: true });
+  if (findActive()) runFind();
+}
+$('#fz-btn').onclick = () => setFuzzy(!S.fuzzy);
+$('#fz-sim').onchange = e => setFuzzy(true, e.target.value);
 
 function showHelp() {
   dialog({
@@ -1518,15 +1726,22 @@ function showHelp() {
       <tr><td>萬曆 -天啟</td><td>減號：排除包含該詞的文件</td></tr>
       <tr><td>"Grand Secretary"</td><td>引號：把含空格的西文短語當作一個詞</td></tr>
       <tr><td>万历</td><td>「異體」模式下可得 萬曆、萬歷、万暦、萬厤 等寫法；跨行斷開的詞也能找到</td></tr>
+      <tr><td>≈ 模糊</td><td>工具欄的「模糊」：容許脫字、衍字、訛字，如「李自成攻陷京師」也可得「李自成陷京師」。
+        按相似度（1 − 差異字數 ÷ 檢索詞字數）篩選，空白和標點不計；3 字以上的詞才模糊匹配，排除詞仍按原方式</td></tr>
     </table>
+    <div class="field"><label>限定檢索範圍</label>
+      <p class="hint" style="margin:0">點側欄的文件夾 —— 只在該文件夾內檢索；⌘ 點擊可同時選幾個文件夾<br>
+      在結果上右鍵 →「只在選中項中檢索」／「加入檢索範圍」—— 自選若干文件和文件夾；點結果上方的「範圍」標籤可查看、移除<br>
+      預覽全文時按 ⌘F —— 只在當前文件內查找（與上方檢索框互不干擾）</p></div>
     <div class="field"><label>三種匹配方式</label>
       <p class="hint" style="margin:0">精確 —— 只匹配輸入的字形（不分大小寫、全半角）<br>
       簡繁 —— 簡體與繁體互通，如 后/後、历/歷/曆<br>
       異體 —— 再加上異體字、舊字形、日本新字體、康熙部首、兼容漢字，如 峯/峰、爲/為、靑/青</p></div>
-    <div class="legend"><span><span class="h1">原字命中</span></span><span><span class="h2">異體命中</span>（原文字形與檢索詞不同）</span></div>
+    <div class="legend"><span><span class="h1">原字命中</span></span><span><span class="h2">異體命中</span>（原文字形與檢索詞不同）</span>
+      <span><span class="h3">模糊差異</span>（與檢索詞不同的字）</span></div>
     <div class="field"><label>快捷鍵</label><p class="hint" style="margin:0">
-      ⌘K 檢索框 · ↑↓ 選擇文件 · ↩ 打開 · 空格 快速查看 · ⌘R 在訪達中顯示 · ⌘G / ⇧⌘G 下一處／上一處命中 ·
-      ⌘D 收藏 · F2 重命名 · ⌘⌫ 移到廢紙簍 · ⌘1/2/3 切換匹配方式</p></div>`,
+      ⌘K 檢索框 · ⌘F 在本文件內查找 · ↑↓ 選擇文件 · ↩ 打開 · 空格 快速查看 · ⌘R 在訪達中顯示 · ⌘G / ⇧⌘G 下一處／上一處命中 ·
+      ⌘D 收藏 · F2 重命名 · ⌘⌫ 移到廢紙簍 · ⌘1/2/3 切換匹配方式 · ⌘4 模糊開關</p></div>`,
     buttons: [{ label: '知道了', primary: true, value: 'ok' }],
   });
 }
@@ -1537,7 +1752,7 @@ async function resetSettings() {
   const exChanged = def.excludes !== undefined && (st.excludes || '') !== def.excludes;
   const r = await dialog({
     title: '恢復默認設置？',
-    desc: '匹配方式（異體）、檢索範圍（僅文件名）、排序、名稱排序規則（跟隨系統）、跨標點匹配（關）、實時監聽（開）、' +
+    desc: '匹配方式（異體）、模糊檢索（關）、檢索範圍（僅文件名）、排序、名稱排序規則（跟隨系統）、跨標點匹配（關）、實時監聽（開）、' +
       '跳過代碼項目（開）、代碼與配置文件只收文件名，以及欄寬和閱讀字號，都恢復為默認。<br>' +
       '<b>資料庫、收藏、標籤、備註和索引都不受影響。</b>',
     body: (groups ? `<div class="field"><label class="switch"><input type="checkbox" id="rs-var">同時清空自定義異體字（${groups} 組）</label></div>` : '') +
@@ -1553,6 +1768,9 @@ async function resetSettings() {
     S.mode = s2.settings.mode || 'full';
     S.scope = s2.settings.scope || 'name';
     S.sort = s2.settings.sort || 'relevance';
+    S.fuzzy = s2.settings.fuzzy === '1';
+    S.fzSim = s2.settings.fuzzy_sim || '0.7';
+    renderFuzzy();
     S.folderView = undefined;
     S.readerSize = 16;
     try { localStorage.removeItem('tj.readerSize'); } catch (e) { /* 忽略 */ }
@@ -1642,10 +1860,12 @@ document.addEventListener('keydown', e => {
   const typing = t.isContentEditable || t.tagName === 'TEXTAREA' || (t.tagName === 'INPUT' && t !== qEl) || t.tagName === 'SELECT';
   const inQ = t === qEl;
   const mod = e.metaKey || e.ctrlKey;
+  if (mod && e.key === 'f' && !e.shiftKey && !e.altKey && openFind()) { e.preventDefault(); return; }
   if (mod && (e.key === 'k' || e.key === 'f' || e.key === 'l')) { e.preventDefault(); qEl.focus(); qEl.select(); return; }
   if (e.key === 'Escape') { if (menuEl) return closeMenu(); return; }
   if (typing) return;
   if (mod && ['1', '2', '3'].includes(e.key)) { e.preventDefault(); return setMode(['exact', 'st', 'full'][+e.key - 1]); }
+  if (mod && e.key === '4') { e.preventDefault(); return setFuzzy(!S.fuzzy); }
   if (mod && e.key.toLowerCase() === 'g') { e.preventDefault(); return gotoHit(S.hit + (e.shiftKey ? -1 : 1)); }
   if (inQ) return;
   if (e.key === '/' ) { e.preventDefault(); qEl.focus(); qEl.select(); return; }
@@ -1741,12 +1961,15 @@ async function init() {
     S.scope = st.settings.scope || 'name';
     S.projects = st.projects || [];
     S.sort = st.settings.sort || 'relevance';
+    S.fuzzy = st.settings.fuzzy === '1';
+    S.fzSim = ['0.9', '0.8', '0.7', '0.6', '0.5'].includes(st.settings.fuzzy_sim) ? st.settings.fuzzy_sim : '0.7';
     if (+st.settings.sidebar_w) document.documentElement.style.setProperty('--sidebar-w', st.settings.sidebar_w + 'px');
     if (+st.settings.list_w) document.documentElement.style.setProperty('--list-w', st.settings.list_w + 'px');
   } catch (e) { fail(e); }
   $$('#mode button').forEach(b => b.classList.toggle('on', b.dataset.mode === S.mode));
   $('#scope').value = S.scope;
   $('#sort').value = S.sort;
+  renderFuzzy();
   if (S.native) document.body.classList.add('native');
   renderAll();
   runSearch();

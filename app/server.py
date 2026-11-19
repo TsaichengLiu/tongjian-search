@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from tj_core import DEFAULT_SETTINGS, Library, UserError, TAG_COLORS  # noqa: E402
+from tj_core import DEFAULT_SETTINGS, Library, UserError, TAG_COLORS, fuzzy_param  # noqa: E402
 
 STATIC = os.path.join(HERE, "static")
 VERSION = "1.0"
@@ -236,7 +236,10 @@ class Handler(BaseHTTPRequestHandler):
         return App.lib.search(p)
 
     def api_preview(self, p, b):
-        return App.lib.preview(int(p["id"]), p.get("q", ""), p.get("mode", "full"))
+        return App.lib.preview(int(p["id"]), p.get("q", ""), p.get("mode", "full"), fz=fuzzy_param(p))
+
+    def api_find(self, p, b):
+        return App.lib.find_in(int(p["id"]), p.get("q", ""), p.get("mode", "full"), fuzzy_param(p))
 
     def api_variants(self, p, b):
         return {"chars": App.lib.variants(p.get("q", ""))}
@@ -290,10 +293,10 @@ class Handler(BaseHTTPRequestHandler):
         return {"ok": True}
 
     def api_folder(self, p, b):
-        return App.lib.folder(p.get("path", ""), p.get("q", ""), p.get("mode", "full"))
+        return App.lib.folder(p.get("path", ""), p.get("q", ""), p.get("mode", "full"), fuzzy_param(p))
 
     def api_folder_files(self, p, b):
-        return App.lib.folder_files(p.get("path", ""), p.get("q", ""), p.get("mode", "full"))
+        return App.lib.folder_files(p.get("path", ""), p.get("q", ""), p.get("mode", "full"), fuzzy_param(p))
 
     def api_open_path(self, p, b):
         path = os.path.realpath(b.get("path", ""))
@@ -372,7 +375,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 SETTING_KEYS = ("custom_variants", "excludes", "cross_punct", "rescan_minutes", "watch", "skip_projects",
-                "code_fulltext", "mode", "scope", "sidebar_w", "list_w", "sort", "collation", "folder_view")
+                "code_fulltext", "mode", "scope", "sidebar_w", "list_w", "sort", "collation", "folder_view",
+                "fuzzy", "fuzzy_sim")
 
 
 class Server(ThreadingHTTPServer):

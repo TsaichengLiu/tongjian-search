@@ -130,6 +130,15 @@ class Normalizer(object):
                 inv.setdefault(rep, set([rep])).add(ch)
             self.inv[lvl] = inv
         self.index_map = _IndexMap(self.maps["full"])
+        self._content = {}
+
+    def content_map(self, level):
+        """模糊檢索用：歸一字形並刪去空白、標點（見 tj_fuzzy.ContentMap）。"""
+        m = self._content.get(level)
+        if m is None:
+            from tj_fuzzy import ContentMap
+            m = self._content[level] = ContentMap(self.maps[level])
+        return m
 
     # ---- 歸一 ----
     def norm(self, s, level="full"):

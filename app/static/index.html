@@ -28,6 +28,19 @@
         <button data-mode="st" title="簡繁：簡體與繁體互通">簡繁</button>
         <button data-mode="full" title="異體：簡繁、異體、舊字形、日本新字體、兼容漢字全部互通">異體</button>
       </div>
+      <div class="fz" id="fz">
+        <button id="fz-btn" class="fz-btn" aria-pressed="false" title="模糊檢索：容許脫字、衍字、訛字（⌘4）">
+          <svg viewBox="0 0 24 24"><path d="M4.5 9.5c2.2-2.4 4.6-2.4 7.5 0s5.3 2.4 7.5 0M4.5 15.5c2.2-2.4 4.6-2.4 7.5 0s5.3 2.4 7.5 0"/></svg>模糊</button>
+        <div class="select-wrap fz-sim" title="相似度下限：越低越寬鬆">
+          <select id="fz-sim">
+            <option value="0.9">≥ 90%</option>
+            <option value="0.8">≥ 80%</option>
+            <option value="0.7">≥ 70%</option>
+            <option value="0.6">≥ 60%</option>
+            <option value="0.5">≥ 50%</option>
+          </select>
+        </div>
+      </div>
       <div class="select-wrap" title="檢索範圍">
         <select id="scope">
           <option value="name">僅文件名</option>
