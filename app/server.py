@@ -121,6 +121,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._raw(int(path[5:].split("/")[0]))
             if method == "GET" and path.startswith("/thumb/"):
                 return self._thumb(int(path[7:].split("/")[0]))
+            if method == "GET" and path.startswith("/page/"):
+                fid, pg = path[6:].split("/")[:2]
+                w = (qs.get("w") or ["1400"])[-1]
+                data = App.lib.render_page(int(fid), int(pg), int(w) if w.isdigit() else 1400)
+                if not data:
+                    return self._err(404, "cannot render")
+                return self._send(200, data, "image/jpeg", {"Cache-Control": "private, max-age=600"})
             if path.startswith("/api/"):
                 p = dict((k, v[-1]) for k, v in qs.items())
                 body = self._body() if method == "POST" else {}

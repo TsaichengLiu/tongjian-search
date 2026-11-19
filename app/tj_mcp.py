@@ -200,6 +200,12 @@ def page_starts(text):
     return [0] + [m.end() for m in re.finditer("\f", text)]
 
 
+def near_empty(r):
+    """幾乎沒有文字層的 PDF（與 tj_core.NEAR_EMPTY_SQL 一致）。"""
+    return r["kind"] == "pdf" and (r["status"] == 2 or (r["status"] == 1 and (r["pages"] or 0) >= 20
+                                                        and (r["chars"] or 0) < r["pages"] * 20))
+
+
 def status_note(r):
     if r["status"] == 2:
         return "沒有文字層（多為掃描件），只能按文件名找到" if r["kind"] == "pdf" else "沒有可抽取的文字"
@@ -367,8 +373,8 @@ class Service(object):
                 meta.append("全文命中 %d%s 處" % (it["hits"], "+" if it.get("capped") else ""))
             if sim is not None and sim < 1:
                 meta.append("最接近處相似 %d%%" % round(sim * 100))
-            if it.get("status") == 2 and it.get("kind") == "pdf":
-                meta.append("無文字層")
+            if near_empty(it):
+                meta.append("無文字層" if it["status"] == 2 else "幾乎無文字層（掃描件）")
             if it.get("tags"):
                 meta.append("標籤：" + "、".join(tags.get(t, "?") for t in it["tags"]))
             lines.append("   " + " · ".join(x for x in meta if x))
@@ -506,8 +512,8 @@ class Service(object):
             for f in files:
                 meta = [KIND_LABEL.get(f["kind"], f["kind"]) + (" %d 頁" % f["pages"] if f.get("pages") else ""),
                         fmt_size(f["size"]), fmt_time(f["mtime"])]
-                if f["status"] == 2 and f["kind"] == "pdf":
-                    meta.append("無文字層")
+                if near_empty(f):
+                    meta.append("無文字層" if f["status"] == 2 else "幾乎無文字層")
                 lines.append("  [id %d] %s · %s" % (f["id"], f["name"], " · ".join(meta)))
         return "\n".join(lines)
 
@@ -530,7 +536,8 @@ class Service(object):
                      "  類型：%s（.%s） · %s · 修改於 %s" % (KIND_LABEL.get(r["kind"], r["kind"]), r["ext"],
                                                        fmt_size(r["size"]), fmt_time(r["mtime"]))]
             if r["status"] == 1:
-                lines.append("  全文：%d 字%s" % (r["chars"], " · %d 頁" % r["pages"] if r["pages"] else ""))
+                lines.append("  全文：%d 字%s%s" % (r["chars"], " · %d 頁" % r["pages"] if r["pages"] else "",
+                                                 "（幾乎沒有文字層，多為掃描件）" if near_empty(r) else ""))
             else:
                 lines.append("  全文：" + status_note(r))
             if r["starred"]:

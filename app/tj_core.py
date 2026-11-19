@@ -75,6 +75,8 @@ MAINT_INTERVAL = 24 * 3600                 # 空閒時每天整理一次數據�
 THUMB_CACHE_MAX = 300 * 1024 * 1024        # 縮略圖緩存上限
 WS_DELETE = dict.fromkeys(map(ord, " \t\r\n\f\v\u3000"), None)
 ASTRAL_RE = re.compile("[\U00010000-\U0010FFFF]")
+# 「幾乎無文字層」的 PDF：至少 20 頁、平均每頁不到 20 個字符（多為掃描件，只有封面、版權頁等有幾個字）
+NEAR_EMPTY_SQL = "(f.status=2 OR (f.status=1 AND f.pages>=20 AND f.chars < f.pages*20))"
 TAG_COLORS = ["#c2412d", "#d98a1c", "#3f8f4f", "#2f7fb3", "#7a55b5", "#b04a85", "#6b6b6b"]
 
 
@@ -404,6 +406,8 @@ class Library(object):
         self.text_cache = LRU((5 if readonly else 20) * 1000 * 1000)
         self.big_sem = threading.Semaphore(1)     # 大文件逐個抽取，避免多個 PDFKit 進程同時佔用大量內存
         self.thumb_sem = threading.Semaphore(3)
+        self.page_sem = threading.Semaphore(2)    # 大 PDF 逐頁渲染：同時至多兩個輔助進程
+        self.page_cache = LRU(12 * 1000 * 1000)  # 最近渲染的頁（JPEG，約一二十頁），空閒時清空
         # 按數據庫分開存放：清理時只會刪本數據庫已不存在的文件的縮略圖
         self.thumb_dir = os.path.join(os.path.expanduser("~/Library/Caches/TongJian"), "thumbs-" +
                                       hashlib.sha1(os.path.realpath(db_path).encode("utf-8")).hexdigest()[:10])
@@ -573,6 +577,7 @@ class Library(object):
                     self.last_relief = now
                     if now - self.last_use > 300:
                         self.text_cache.clear()     # 5 分鐘沒有檢索：清空全文緩存
+                        self.page_cache.clear()
                         self.norm.drop_content_maps()   # 以及模糊檢索的字表、名稱表（用時幾毫秒重建）
                         self.names.drop_fuzzy()
                     release_memory()
@@ -1197,7 +1202,7 @@ class Library(object):
             args += [d, d + "/", d + "0"]
         k = p.get("kind")
         if k == "notext":
-            where.append("f.status=2 AND f.kind='pdf'")
+            where.append(NEAR_EMPTY_SQL + " AND f.kind='pdf'")
         elif k:
             where.append("f.kind=?")
             args.append(k)
@@ -1774,6 +1779,33 @@ class Library(object):
                         pass
         return out
 
+    def render_page(self, fid, page, width):
+        """把 PDF 的一頁渲染成 JPEG（給很大的 PDF 逐頁預覽，免得 WebKit 整本載入）。不寫磁盤，只在內存裡留最近幾頁。"""
+        self.last_use = _now()
+        r = self._row(fid)
+        if r["kind"] != "pdf" or not self.helper or not os.path.exists(r["path"]):
+            return None
+        width = max(400, min(3200, int(width) // 200 * 200 or 1400))
+        key = (fid, int(r["mtime"] or 0), int(page), width)
+        hit = self.page_cache.get(key)
+        if hit is not None:
+            return hit[0]
+        with self.page_sem:
+            hit = self.page_cache.get(key)
+            if hit is not None:
+                return hit[0]
+            try:
+                pr = subprocess.run([self.helper, "render", r["path"], str(int(page)), str(width)],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=40)
+            except subprocess.TimeoutExpired:
+                raise UserError("渲染超時")
+            if pr.returncode == 3:
+                raise UserError("頁碼超出範圍")
+            if pr.returncode != 0 or not pr.stdout:
+                raise UserError("無法渲染這一頁：%s" % pr.stderr.decode("utf-8", "replace").strip())
+            self.page_cache.put(key, pr.stdout, len(pr.stdout))
+            return pr.stdout
+
     def _prune_thumbs(self):
         """刪掉已不在索引中的文件的縮略圖、文件改動前的舊縮略圖，總量超過上限時按最近使用時間淘汰。"""
         if not os.path.isdir(self.thumb_dir):
@@ -2128,7 +2160,8 @@ class Library(object):
     def _stats(self):
         c = self.conn()
         kinds = dict((r[0], r[1]) for r in c.execute("SELECT kind, COUNT(*) FROM files GROUP BY kind"))
-        tot = c.execute("SELECT COUNT(*), SUM(status=1), SUM(status=2 AND kind='pdf'), SUM(starred), SUM(chars) FROM files"
+        tot = c.execute("SELECT COUNT(*), SUM(f.status=1), SUM(%s AND f.kind='pdf'), SUM(f.starred), SUM(f.chars) "
+                        "FROM files f" % NEAR_EMPTY_SQL
                         ).fetchone()
         return {"kinds": kinds, "files": tot[0] or 0, "texts": tot[1] or 0, "notext": tot[2] or 0,
                 "starred": tot[3] or 0, "chars": tot[4] or 0}

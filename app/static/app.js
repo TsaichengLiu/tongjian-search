@@ -53,7 +53,7 @@ const S = {
   res: null, items: [], cur: null, sel: new Set(), anchor: null,
   pv: null, pvTab: 'text', pvTabPref: 'text', hit: 0, hitEls: [], pendingPos: null,
   dirs: {}, openRoots: new Set(), openDirs: new Set(),
-  readerSize: 16, lastRescan: 0,
+  readerSize: 16, lastRescan: 0, fullPdf: new Set(), pg: null, pgLast: {},
 };
 
 async function api(path, body) {
@@ -72,6 +72,11 @@ async function api(path, body) {
 const rawUrl = (id, hash = '') => `/raw/${id}?t=${encodeURIComponent(S.token)}${hash}`;
 const thumbUrl = id => `/thumb/${id}?t=${encodeURIComponent(S.token)}`;
 const fzQS = () => (S.fuzzy ? `&fuzzy=1&sim=${S.fzSim}` : '');
+// 很大的 PDF：WebKit 整本載入要好幾秒、佔幾百 MB 內存，改為逐頁渲染成圖片顯示
+const isBigPdf = pv => pv.kind === 'pdf' && ((pv.size || 0) >= 60e6 || (pv.pages || 0) >= 2000);
+// 幾乎沒有文字層（多為掃描件）：至少 20 頁、平均每頁不到 20 個字符。與後台的 NEAR_EMPTY_SQL 一致
+const nearEmpty = it => it.kind === 'pdf' && (it.status === 2 ||
+  (it.status === 1 && (it.pages || 0) >= 20 && (it.chars || 0) < it.pages * 20));
 const topPv = pv => { while (pv && pv.back) pv = pv.back; return pv; };
 async function openPath(path, reveal) { try { await api('open-path', { path, reveal: !!reveal }); } catch (e) { fail(e); } }
 
@@ -1016,6 +1021,12 @@ async function loadPreview(id, back) {
     const r = await api(`preview?id=${id}&q=${encodeURIComponent(S.q)}&mode=${S.mode}${fzQS()}`);
     if (seq !== pvSeq) return;
     r.back = back || null;
+    if (r.text && r.text.indexOf('\f') >= 0) {
+      let n = 0;
+      for (const pg of r.text.split('\f')) if (/\S/.test(pg)) n++;
+      r.textPages = n;
+    }
+    r.sparse = nearEmpty(r) && r.status === 1;
     S.pv = r;
     S.hit = 0;
     S.pvTab = chooseTab(r, S.pvTabPref);
@@ -1034,6 +1045,7 @@ function tabsFor(pv) {
 }
 function chooseTab(pv, pref) {
   const t = tabsFor(pv);
+  if (pv.sparse && t.includes('orig') && pref !== 'info') return 'orig';   // 掃描件：全文幾乎是空的，先看原件
   if (pref === 'orig' && t.includes('orig') && (pv.kind === 'pdf' || pv.kind === 'image')) return 'orig';
   if (t.includes(pref) && pref !== 'orig') return pref;
   if (t.includes('text')) return 'text';
@@ -1281,11 +1293,67 @@ function renderOrig(body) {
   const page = S.origPage ? '#page=' + S.origPage : '';
   S.origPage = null;
   if (!pv.exists) { body.innerHTML = `<div class="pv-msg">文件已不在原處。</div>`; return; }
+  if (pv.kind === 'pdf' && isBigPdf(pv) && !S.fullPdf.has(pv.id)) return renderPager(body, +page.slice(6) || 0);
   if (pv.kind === 'pdf') body.innerHTML = `<iframe class="frame" src="${rawUrl(pv.id, page)}"></iframe>`;
   else if (pv.kind === 'image') body.innerHTML = `<div class="img-view"><img src="${rawUrl(pv.id)}" alt=""></div>`;
   else if (pv.ext === 'html' || pv.ext === 'htm') body.innerHTML = `<iframe class="frame" sandbox="" src="${rawUrl(pv.id)}"></iframe>`;
   else body.innerHTML = `<div class="pv-msg">這類文件不能在通檢裡直接顯示。<br>
     <button class="btn" data-act="ql">${I.eye}快速查看</button> <button class="btn primary" data-act="open">${I.open}打開</button></div>`;
+}
+// ---- 大 PDF 逐頁預覽：後台用 PDFKit 渲染當前頁（不寫磁盤，只在內存裡留最近幾頁），WebKit 不必載入整本
+let pgSeq = 0;
+function renderPager(body, start) {
+  const pv = S.pv, n = pv.pages || 0;
+  const p = Math.max(1, Math.min(n || 1, start || S.pgLast[pv.id] || 1));
+  const fit = S.pgFit || 'page';
+  S.pg = { id: pv.id, page: p };
+  body.innerHTML = `<div class="pgbar">
+      <button class="icon-btn" data-act="pg-prev" title="上一頁（←）">${I.chev.replace('<svg', '<svg style="transform:rotate(180deg)"')}</button>
+      <span class="pg-pos">第 <input id="pg-no" type="text" inputmode="numeric" autocomplete="off" value="${p}"> / ${fmtNum(n)} 頁</span>
+      <button class="icon-btn" data-act="pg-next" title="下一頁（→）">${I.chev}</button>
+      <span class="vsep"></span>
+      <button class="btn mini${fit === 'page' ? ' on' : ''}" data-act="pg-fit" data-fit="page" title="整頁顯示">整頁</button>
+      <button class="btn mini${fit === 'width' ? ' on' : ''}" data-act="pg-fit" data-fit="width" title="適合寬度">寬度</button>
+      <span class="grow"></span>
+      <span class="pg-hint" title="這個 PDF 很大（${fmtSize(pv.size)}，${fmtNum(n)} 頁），整本載入要好幾秒、佔用較多內存，所以逐頁顯示">逐頁顯示</span>
+      <button class="btn mini" data-act="pg-full" title="在通檢裡載入整個 PDF（可連續滾動、選字，但要等幾秒）">載入整本</button>
+    </div>
+    <div class="pgview fit-${fit}" id="pgview"><img id="pg-img" alt=""><div class="pg-msg" id="pg-msg" hidden></div></div>`;
+  const inp = $('#pg-no', body);
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); const v = parseInt(inp.value, 10); if (v) showPage(v); inp.blur(); }
+    else if (e.key === 'Escape') { inp.value = S.pg.page; inp.blur(); }
+  });
+  inp.addEventListener('focus', () => inp.select());
+  showPage(p);
+}
+function pageUrl(id, p) {
+  const v = $('#pgview');
+  const w = Math.min(3200, Math.max(800, Math.ceil((v ? v.clientWidth : 900) * (window.devicePixelRatio || 1) / 200) * 200));
+  return `/page/${id}/${p}?w=${w}&t=${encodeURIComponent(S.token)}`;
+}
+function showPage(p) {
+  const pv = S.pv;
+  if (!pv || !S.pg || S.pg.id !== pv.id || !$('#pg-img')) return;
+  const n = pv.pages || 0;
+  p = Math.max(1, n ? Math.min(n, p) : p);
+  S.pg.page = p;
+  S.pgLast[pv.id] = p;
+  const inp = $('#pg-no'), msg = $('#pg-msg');
+  if (inp && document.activeElement !== inp) inp.value = p;
+  const url = pageUrl(pv.id, p), seq = ++pgSeq;
+  const slow = setTimeout(() => { if (seq === pgSeq) { msg.textContent = '渲染中…'; msg.hidden = false; } }, 150);
+  const im = new Image();
+  im.onload = () => {
+    clearTimeout(slow);
+    if (seq !== pgSeq || !$('#pg-img')) return;
+    $('#pg-img').src = url;
+    msg.hidden = true;
+    $('#pgview').scrollTop = 0;
+    if (p < n) { const pre = new Image(); pre.src = pageUrl(pv.id, p + 1); }   // 預先渲染下一頁
+  };
+  im.onerror = () => { clearTimeout(slow); if (seq === pgSeq) { msg.textContent = '這一頁無法顯示'; msg.hidden = false; } };
+  im.src = url;
 }
 function renderInfo(body) {
   const pv = S.pv;
@@ -1395,9 +1463,29 @@ function paintReader() {
     if (!blocks.length) blocks.push([0, 0, 0]);
   }
   const frag = document.createDocumentFragment();
+  if (pv.sparse) {
+    const note = document.createElement('div');
+    note.className = 'sparse-note';
+    note.innerHTML = `這個 PDF 幾乎沒有文字層：${fmtNum(pv.pages)} 頁中只有 ${fmtNum(pv.textPages || 0)} 頁有文字（多為掃描件，只能按文件名找到）。
+      <button class="btn mini" data-tab-to="orig">${I.page}看原件</button>`;
+    frag.appendChild(note);
+  }
   S.hitEls = new Array(spans.length);
-  let si = 0;
+  let si = 0, run = null;
+  const flushRun = () => {         // 連續的空白頁合成一行，免得幾千個空頁拖慢顯示
+    if (!run) return;
+    const d = document.createElement('div');
+    d.className = 'blk empty-run';
+    d.textContent = run[0] === run[1] ? `第 ${run[0]} 頁沒有文字` : `第 ${run[0]}–${run[1]} 頁沒有文字`;
+    frag.appendChild(d);
+    run = null;
+  };
   for (const [a, b, page] of blocks) {
+    if (page && !(si < spans.length && spans[si][0] < b) && !/\S/.test(text.slice(a, b))) {
+      if (run) run[1] = page; else run = [page, page];
+      continue;
+    }
+    flushRun();
     const div = document.createElement('div');
     div.className = 'blk';
     if (page) {
@@ -1425,6 +1513,7 @@ function paintReader() {
     if (pos < b) div.appendChild(document.createTextNode(text.slice(pos, b)));
     frag.appendChild(div);
   }
+  flushRun();
   reader.appendChild(frag);
   if (pv.truncated) reader.insertAdjacentHTML('beforeend', `<div class="trunc">文本過長，只顯示前 ${fmtNum(text.length)} 字。</div>`);
   let start = 0;
@@ -1614,6 +1703,16 @@ $('#preview').addEventListener('click', async e => {
     case 'prev-hit': return gotoHit(S.hit - 1);
     case 'next-hit': return gotoHit(S.hit + 1);
     case 'find': return S.find.open ? closeFind() : openFind();
+    case 'pg-prev': return S.pg && showPage(S.pg.page - 1);
+    case 'pg-next': return S.pg && showPage(S.pg.page + 1);
+    case 'pg-fit': {
+      S.pgFit = b.dataset.fit;
+      const v = $('#pgview');
+      if (v) v.className = 'pgview fit-' + S.pgFit;
+      $$('[data-act="pg-fit"]').forEach(x => x.classList.toggle('on', x.dataset.fit === S.pgFit));
+      return;
+    }
+    case 'pg-full': S.fullPdf.add(id); S.origPage = S.pg ? S.pg.page : null; return renderPreviewBody();
     case 'find-close': return closeFind();
     case 'orig-page': S.origPage = curPage(); S.pvTab = S.pvTabPref = 'orig'; return renderPreviewBody();
     case 'font-up': case 'font-down': {
@@ -1867,6 +1966,10 @@ document.addEventListener('keydown', e => {
   if (mod && e.key.toLowerCase() === 'g') { e.preventDefault(); return gotoHit(S.hit + (e.shiftKey ? -1 : 1)); }
   if (inQ) return;
   if (e.key === '/' ) { e.preventDefault(); qEl.focus(); qEl.select(); return; }
+  if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && S.pg && S.pvTab === 'orig' && $('#pg-img')) {
+    e.preventDefault();
+    return showPage(S.pg.page + (e.key === 'ArrowRight' ? 1 : -1));
+  }
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); return moveCursor(e.key === 'ArrowDown' ? 1 : -1, e.shiftKey); }
   if (!S.cur && !S.pv) return;
   const pvFolder = S.pv && S.pv.folder ? S.pv : null;

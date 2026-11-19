@@ -2,6 +2,7 @@
 //   tjhelper pdftext <file.pdf>   用 PDFKit 抽取文字，頁與頁之間輸出 \f
 //   tjhelper trash <path>         移到廢紙簍（可在訪達中「放回原處」）
 //   tjhelper thumb <path> <out.jpg> [size]   用 QuickLook 生成縮略圖
+//   tjhelper render <file.pdf> <page> [width]   把 PDF 的一頁渲染成 JPEG，寫到標準輸出（大 PDF 逐頁預覽用）
 //   tjhelper watch <dir>...       用 FSEvents 監聽變化，每條輸出「flags\tpath\0」；stdin 關閉即退出
 import Foundation
 import ImageIO
@@ -40,6 +41,43 @@ case "trash":
     } catch {
         fail(error.localizedDescription)
     }
+case "render":
+    guard args.count >= 4, let pno = Int(args[3]) else { fail("usage: tjhelper render <file.pdf> <page> [width]", 2) }
+    let width = max(200, min(4000, Int(args.count > 4 ? args[4] : "1400") ?? 1400))
+    guard let doc = CGPDFDocument(url as CFURL) else { fail("無法打開 PDF") }
+    if doc.isEncrypted && !doc.unlockWithPassword("") { fail("PDF 已加密") }
+    guard let page = doc.page(at: pno) else { fail("頁碼超出範圍", 3) }
+    let box = page.getBoxRect(.cropBox)
+    let rot = ((Int(page.rotationAngle) % 360) + 360) % 360
+    let dispW = rot % 180 == 0 ? box.width : box.height
+    let dispH = rot % 180 == 0 ? box.height : box.width
+    guard dispW > 0, dispH > 0 else { fail("頁面尺寸無效") }
+    let w = width, h = max(1, Int((CGFloat(width) * dispH / dispW).rounded()))
+    guard h <= 12000, let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                          space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { fail("頁面太長") }
+    ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+    ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+    ctx.interpolationQuality = .high
+    let s = CGFloat(w) / dispW
+    ctx.scaleBy(x: s, y: s)                       // 以下單位為顯示方向上的點
+    switch rot {                                  // 頁面的 /Rotate 是順時針角度
+    case 90: ctx.translateBy(x: 0, y: dispH); ctx.rotate(by: -.pi / 2)
+    case 180: ctx.translateBy(x: dispW, y: dispH); ctx.rotate(by: .pi)
+    case 270: ctx.translateBy(x: dispW, y: 0); ctx.rotate(by: .pi / 2)
+    default: break
+    }
+    ctx.translateBy(x: -box.minX, y: -box.minY)
+    ctx.clip(to: box)
+    ctx.drawPDFPage(page)
+    guard let img = ctx.makeImage() else { fail("渲染失敗") }
+    let data = NSMutableData()
+    guard let dst = CGImageDestinationCreateWithData(data as CFMutableData, "public.jpeg" as CFString, 1, nil) else {
+        fail("無法編碼")
+    }
+    CGImageDestinationAddImage(dst, img, [kCGImageDestinationLossyCompressionQuality: 0.82] as CFDictionary)
+    if !CGImageDestinationFinalize(dst) { fail("無法編碼") }
+    FileHandle.standardOutput.write(data as Data)
 case "thumb":
     guard args.count >= 4 else { fail("usage: tjhelper thumb <path> <out.jpg> [size]", 2) }
     let out = URL(fileURLWithPath: args[3])
