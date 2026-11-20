@@ -66,7 +66,6 @@ DEFAULT_SETTINGS = {
     "fuzzy_sim": "0.7",
     "find_fuzzy": "0",
     "find_sim": "0.7",
-    "pdf_view": "pages",
     "history_on": "1",
     "merge_dups": "1",
 }
@@ -1654,7 +1653,7 @@ class Library(object):
     # 「恢復默認設置」會重置的項；自定義異體字與排除列表另行勾選
     RESETTABLE = ("cross_punct", "rescan_minutes", "watch", "skip_projects", "code_fulltext", "mode", "scope",
                   "sort", "collation", "sidebar_w", "list_w", "folder_view", "fuzzy", "fuzzy_sim",
-                  "reader_size", "find_fuzzy", "find_sim", "pdf_view", "history_on", "merge_dups")
+                  "reader_size", "find_fuzzy", "find_sim", "history_on", "merge_dups")
 
     def reset_settings(self, variants=False, excludes=False):
         keys = list(self.RESETTABLE) + (["custom_variants"] if variants else []) + (["excludes"] if excludes else [])
@@ -1844,21 +1843,50 @@ class Library(object):
         hit = self.page_cache.get(key)
         if hit is not None:
             return hit[0]
+        bkey = (fid, int(r["mtime"] or 0), int(page))
         with self.page_sem:
             hit = self.page_cache.get(key)
             if hit is not None:
                 return hit[0]
-            try:
-                pr = subprocess.run([self.helper, "render", r["path"], str(int(page)), str(width)],
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=40)
-            except subprocess.TimeoutExpired:
-                raise UserError("渲染超時")
-            if pr.returncode == 3:
-                raise UserError("頁碼超出範圍")
+            # 有文字的頁：圖和逐字位置一次取（瀏覽器在圖載入後才要位置，那時已在緩存裡）
+            both = r["status"] == 1 and self.box_cache.get(bkey) is None and bool(self._page_seg(fid, page)[1].strip())
+            for cmd in (("page", "render") if both else ("render",)):
+                try:
+                    pr = subprocess.run([self.helper, cmd, r["path"], str(int(page)), str(width)],
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=40)
+                except subprocess.TimeoutExpired:
+                    raise UserError("渲染超時")
+                if pr.returncode == 3:
+                    raise UserError("頁碼超出範圍")
+                if pr.returncode == 0 and pr.stdout:
+                    break
             if pr.returncode != 0 or not pr.stdout:
                 raise UserError("無法渲染這一頁：%s" % pr.stderr.decode("utf-8", "replace").strip())
-            self.page_cache.put(key, pr.stdout, len(pr.stdout))
-            return pr.stdout
+            data = pr.stdout
+            if cmd == "page":
+                nl = data.find(b"\n")
+                n = int(data[:nl]) if 0 < nl < 12 and data[:nl].isdigit() else -1
+                if n <= 0 or nl + 1 + n > len(data):
+                    raise UserError("無法渲染這一頁")
+                js = data[nl + 1 + n:]
+                data = data[nl + 1:nl + 1 + n]
+                self.box_cache.put(bkey, js, len(js) + 64)
+            self.page_cache.put(key, data, len(data))
+            return data
+
+    def _page_seg(self, fid, page):
+        """全文裡第 page 頁的起點（碼位）和文字。"""
+        text = self.get_text(fid)
+        if not text:
+            return 0, ""
+        k, o0 = 1, 0
+        while k < page:
+            j = text.find("\f", o0)
+            if j < 0:
+                return 0, ""
+            o0, k = j + 1, k + 1
+        j = text.find("\f", o0)
+        return o0, text[o0:j if j >= 0 else len(text)]
 
     def page_boxes(self, fid, page):
         """原件上的標註：這一頁文字層的逐字位置，對回全文。

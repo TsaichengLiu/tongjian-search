@@ -55,6 +55,11 @@ final class TJWebView: WKWebView {
                 add("拷貝（附出處）", "cite")
             }
             if c["pdf"] as? Bool == true { add("在原件中查看此處", "orig") }
+        } else if kind == "orig", !sel.isEmpty {        // 原件上選中的文字
+            add("在通檢中檢索「\(short)」", "search")
+            add("在本文件內查找「\(short)」", "find")
+            add("拷貝（附出處）", "cite")
+            add("在全文中查看此處", "text")
         } else if kind == "text", !sel.isEmpty {
             add("在通檢中檢索「\(short)」", "search")
         }

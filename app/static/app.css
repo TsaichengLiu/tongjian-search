@@ -552,6 +552,11 @@ mark, .h1, .h2 { color: inherit; border-radius: 2px; }
 .pdfv-num { position: absolute; inset: 0; display: grid; place-items: center; color: #c9c2b6; font: 600 20px var(--ui); }
 .pdfv-pg.err .pdfv-num::after { content: "　此頁無法顯示"; font-size: 13px; font-weight: 400; }
 .pdfv-pg svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+/* 文字層：透明的字疊在圖上，只有字本身接收鼠標（空白處照舊拖動平移） */
+.pdfv-tl { position: absolute; inset: 0; pointer-events: none; user-select: text; -webkit-user-select: text; }
+.pdfv-tl span { position: absolute; line-height: 1; white-space: pre; color: transparent; pointer-events: auto; cursor: text; }
+.pdfv-tl span::selection { background: rgba(47, 98, 181, .30); color: transparent; }
+.pdfv.over-hit .pdfv-tl span { cursor: pointer; }
 /* 檢索片段裡的命中：懸停時右側預覽跳過去 */
 /* 有作用的懸停：外面套一個小框（參照「對勘」） */
 .item.sel .snip .sh.hot, .reader.can-orig mark:hover {
@@ -757,8 +762,7 @@ mark, .h1, .h2 { color: inherit; border-radius: 2px; }
 .tr.dir .tn { font-weight: 550; }
 .tn .star { color: #d99a1c; margin-right: 3px; font-size: 11px; }
 .tc, .ts, .td { font-size: 11.5px; color: var(--text-3); text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.tr.hit { background: var(--accent-soft); }
-.tr.hit:hover { background: var(--accent-soft-2); }
+/* 名稱命中：只高亮命中的字（與別處一致），整行不著色，免得看著像選中了 */
 .hit-dot {
   display: inline-block; margin-left: 6px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px;
   background: var(--accent); color: #fff; font: 600 10px/16px var(--ui); text-align: center; vertical-align: 1px;
@@ -767,7 +771,7 @@ mark, .h1, .h2 { color: inherit; border-radius: 2px; }
 .dtile .tile-img { color: #c4912e; position: relative; }
 .dtile .tile-img svg { width: 46%; height: 46%; stroke-width: 1.2; fill: rgba(196, 145, 46, .14); }
 .dtile .dcount { position: absolute; bottom: 6px; right: 8px; font-size: 11px; color: var(--text-3); }
-.tile.hit { background: var(--accent-soft); }
+
 @container (max-width: 560px) {
   .tr { grid-template-columns: auto minmax(0, 1fr) 54px 60px; }
   .tr .td { display: none; }
