@@ -383,6 +383,13 @@ class Handler(BaseHTTPRequestHandler):
     def api_settings(self, p, b):
         lib = App.lib
         changed = set()
+        if "default_exts" in b:
+            seen = []
+            for x in re.split(r"[\s,，、;；]+", str(b["default_exts"])):
+                x = x.strip().lstrip(".").lower()[:16]
+                if x and x not in seen:
+                    seen.append(x)
+            b["default_exts"] = ",".join(seen[:40])
         for k, v in b.items():
             if k in SETTING_KEYS and str(v) != lib.setting(k):
                 lib.set_setting(k, v)
@@ -407,7 +414,8 @@ class Handler(BaseHTTPRequestHandler):
 
 SETTING_KEYS = ("custom_variants", "excludes", "cross_punct", "rescan_minutes", "watch", "skip_projects",
                 "code_fulltext", "mode", "scope", "sidebar_w", "list_w", "sort", "collation", "folder_view",
-                "fuzzy", "fuzzy_sim", "reader_size", "find_fuzzy", "find_sim", "pdf_view", "history_on", "merge_dups")
+                "fuzzy", "fuzzy_sim", "reader_size", "find_fuzzy", "find_sim", "pdf_view", "history_on", "merge_dups",
+                "default_exts")
 
 
 class Server(ThreadingHTTPServer):

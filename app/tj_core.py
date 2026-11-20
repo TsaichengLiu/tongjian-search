@@ -69,6 +69,7 @@ DEFAULT_SETTINGS = {
     "pdf_view": "pages",
     "history_on": "1",
     "merge_dups": "1",
+    "default_exts": "",          # 每次打開時自動選中的類型（擴展名，逗號分隔，「-」= 無擴展名）
 }
 # 含這些文件的文件夾視為代碼項目，整個跳過
 PROJECT_MARKERS = {"package.json", "pyproject.toml", "setup.py", "requirements.txt", "Cargo.toml",
@@ -1645,7 +1646,8 @@ class Library(object):
     # 「恢復默認設置」會重置的項；自定義異體字與排除列表另行勾選
     RESETTABLE = ("cross_punct", "rescan_minutes", "watch", "skip_projects", "code_fulltext", "mode", "scope",
                   "sort", "collation", "sidebar_w", "list_w", "folder_view", "fuzzy", "fuzzy_sim",
-                  "reader_size", "find_fuzzy", "find_sim", "pdf_view", "history_on", "merge_dups")
+                  "reader_size", "find_fuzzy", "find_sim", "pdf_view", "history_on", "merge_dups",
+                  "default_exts")
 
     def reset_settings(self, variants=False, excludes=False):
         keys = list(self.RESETTABLE) + (["custom_variants"] if variants else []) + (["excludes"] if excludes else [])

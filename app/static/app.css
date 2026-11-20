@@ -224,6 +224,7 @@ svg .fill { fill: currentColor; stroke: none; }
 }
 .ext-chip .badge { min-width: 0; height: 17px; padding: 0 5px; font-size: 9px; line-height: 17px; border-radius: 4px; text-transform: uppercase; }
 .ext-chip:hover { background: rgba(120, 100, 70, .08); color: var(--text-2); }
+.ext-chip.def::after { content: ""; width: 4px; height: 4px; border-radius: 2px; background: currentColor; opacity: .5; margin-left: -2px; }
 .ext-chip.on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .ext-more { border: 0; background: none; color: var(--text-3); font-size: 11px; height: 24px; padding: 0 6px; }
 .ext-more:hover { color: var(--accent); }
