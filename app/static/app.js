@@ -1437,7 +1437,8 @@ function renderViewer(body, start) {
   const pv = S.pv, n = Math.max(1, pv.pages || 1);
   V = { id: pv.id, n, zi: S.pdfZoom != null ? S.pdfZoom : 3, pa: 1.4142, paSet: false, aspects: {}, live: new Map(),
     marksCache: new Map(), pad: 12, gap: 12, cur: 1, marked: 0, unmarked: 0, sraf: 0, ro: null,
-    hasText: pv.status === 1 && pv.text != null && !pv.sparse, spans: annotSpans(), focus: null, focused: false, moved: false };
+    hasText: pv.status === 1 && pv.text != null && !pv.sparse, spans: annotSpans(), focus: null, focused: false, moved: false,
+    t0: performance.now(), rehover: null };
   if (S.pdfFocus && S.pdfFocus.id === pv.id) { V.focus = S.pdfFocus; S.pendingPos = null; }
   S.pdfFocus = null;
   body.innerHTML = `<div class="pgbar">
@@ -1604,8 +1605,11 @@ function focusOrig(s, e) {
   V.focus = { id: V.id, s, e: e == null ? s : e };
   V.focused = false;
   V.moved = false;
-  V.box.scrollTop = pageTop(pageOfOffset(S.pv, s)) - 10;
-  syncPages();
+  const k = pageOfOffset(S.pv, s), top = pageTop(k), st = V.box.scrollTop, h = V.box.clientHeight;
+  if (!V.live.has(k) || top + V.slotH < st + h * 0.1 || top > st + h * 0.8) {
+    V.box.scrollTop = top - 10;
+    syncPages();
+  }
   for (const pg of V.live.values()) if (pg.marks) drawMarks(pg);
 }
 // 相鄰的逐字框合成行（橫排）或列（豎排）
@@ -1704,12 +1708,18 @@ function drawMarks(pg) {
   svg.appendChild(pg.hovG);
   pg.svg = svg;
   pg.inner.appendChild(svg);
+  markTl(pg);
   if (pg.tl && pg.tl.dataset.a !== String(pg.aspect)) { pg.tl.remove(); pg.tl = null; buildTextLayer(pg); }   // 高寬比變了：字號重算
   if (foc.length && !V.focused && !V.moved) {
     V.focused = true;
-    V.box.scrollTop = pageTop(pg.n) + foc[0][1] * pg.inner.offsetHeight - V.box.clientHeight / 3;
-    syncPages();
+    const y0 = pageTop(pg.n) + foc[0][1] * pg.inner.offsetHeight, y1 = y0 + foc[0][3] * pg.inner.offsetHeight;
+    const st = V.box.scrollTop, h = V.box.clientHeight;
+    if (y0 < st + h * 0.1 || y1 > st + h * 0.8) {
+      V.box.scrollTop = y0 - h / 3;
+      syncPages();
+    }
   }
+  if (V.rehover) V.rehover();
 }
 // ---- 原件的文字層：每個字一個透明的 span，疊在頁面圖上它的位置，用來拖選、拷貝、右鍵
 // 只為鼠標移到過的頁建（頁移出視區即連同頁面元素刪掉），一般只有一兩頁；字號按頁寬的比例，縮放時不用重建。
@@ -1735,6 +1745,16 @@ function buildTextLayer(pg) {
   tl.innerHTML = h;
   pg.inner.insertBefore(tl, pg.svg || null);
   pg.tl = tl;
+  markTl(pg);
+}
+// 文字層裡屬於命中的字：手形光標（雙擊可回到全文）
+function markTl(pg) {
+  if (!pg.tl) return;
+  const hs = pg.hits || [];
+  for (const sp of pg.tl.children) {
+    const o = +sp.dataset.o;
+    sp.classList.toggle('h', hs.some(x => o >= x.s && o < Math.max(x.e, x.s + 1)));
+  }
 }
 // 原件上選中的文字 → 全文裡的範圍（按全文取，保留換行）
 function origSelection() {
@@ -1819,43 +1839,51 @@ function bindViewer(box) {
     else if (e.key === 'Escape') { go.value = v.cur; go.blur(); }
   });
   go.addEventListener('focus', () => go.select());
-  box.addEventListener('scroll', () => { if (!v.sraf) v.sraf = setTimeout(() => { v.sraf = 0; if (V === v) syncPages(); }, 50); });
-  // 懸停在命中上：加框（雙擊可回到全文）
-  let hov = null, mev = null, raf = 0;
+  // 懸停在命中上：加框（雙擊可回到全文）。按指針最後的位置重算——鼠標不動而頁面滾動、標註重繪後也對
+  let hov = null, px = -1, py = -1, raf = 0;
   const setHov = h => {
-    if (hov && h && hov.pg === h.pg && hov.s === h.s) return;
+    if (hov && h && hov.pg === h.pg && hov.s === h.s && hov.g === h.pg.hovG && hov.g && hov.g.firstChild) return;
     if (hov && hov.pg.hovG) { hov.pg.hovG.textContent = ''; hov.pg.inner.removeAttribute('title'); }
     hov = h;
     box.classList.toggle('over-hit', !!h);
     if (h && h.pg.hovG) {
+      h.g = h.pg.hovG;
       const H = 1000 * h.pg.aspect;
-      h.rects.forEach(b => { addRect(h.pg.hovG, H, b, 'pm-hov-halo', 4); addRect(h.pg.hovG, H, b, 'pm-hov', 4); });
+      h.rects.forEach(b => { addRect(h.g, H, b, 'pm-hov-halo', 4); addRect(h.g, H, b, 'pm-hov', 4); });
       h.pg.inner.title = '雙擊：在全文中查看';
     }
   };
-  box.addEventListener('mousemove', e => {
-    mev = e;
-    if (!raf) raf = requestAnimationFrame(() => {
-      raf = 0;
-      if (V !== v || !mev) return;
-      const p = pagePoint(mev);
-      if (p && !p.pg.tl) buildTextLayer(p.pg);           // 文字層只給鼠標所在的頁建（選字總從移動鼠標開始）
-      setHov(hitAt(mev));
-    });
-  });
-  box.addEventListener('mouseleave', () => { mev = null; if (V === v) setHov(null); });
-  box.addEventListener('dblclick', e => {
-    const h = hitAt(e);
-    if (h) { e.preventDefault(); window.getSelection().removeAllRanges(); gotoText(h.s, h.e); }
+  const updHov = () => {
+    raf = 0;
+    if (V !== v || px < 0) return;
+    const t = document.elementFromPoint(px, py);
+    if (!t || !box.contains(t)) return setHov(null);
+    const at = { target: t, clientX: px, clientY: py }, p = pagePoint(at);
+    if (p && !p.pg.tl) buildTextLayer(p.pg);               // 文字層只給鼠標所在的頁建（選字總從移動鼠標開始）
+    setHov(hitAt(at));
+  };
+  v.rehover = () => { if (px >= 0 && !raf) raf = requestAnimationFrame(updHov); };
+  box.addEventListener('mousemove', e => { px = e.clientX; py = e.clientY; v.rehover(); });
+  box.addEventListener('mouseleave', () => { px = -1; if (V === v) setHov(null); });
+  box.addEventListener('scroll', () => {
+    v.rehover();
+    if (!v.sraf) v.sraf = setTimeout(() => { v.sraf = 0; if (V === v) syncPages(); }, 50);
   });
   // 拖動平移
   box.addEventListener('mousedown', e => {
     const r = box.getBoundingClientRect();
     if (e.button !== 0 || e.clientX - r.left > box.clientWidth || e.clientY - r.top > box.clientHeight) return;
-    if (e.target.closest('.pdfv-tl span')) return;        // 在字上按下：交給瀏覽器選字
+    const h = hitAt(e);
+    if (secondDown(e, h ? 'o' + h.pg.n + ':' + h.s : null)) {
+      e.preventDefault();
+      window.getSelection().removeAllRanges();
+      return gotoText(h.s, h.e);
+    }
+    box.focus({ preventScroll: true });
+    const sp = e.target.closest('.pdfv-tl span');
+    if (sp) { dropSelectionAt(sp); return; }               // 在字上按下：交給瀏覽器選字
     e.preventDefault();
     if (!e.shiftKey) window.getSelection().removeAllRanges();
-    box.focus({ preventScroll: true });
     const sx = e.clientX, sy = e.clientY, sl = box.scrollLeft, st = box.scrollTop;
     let moved = false;
     const move = ev => {
@@ -1874,7 +1902,7 @@ function bindViewer(box) {
   });
   let pinch = 0;
   box.addEventListener('wheel', e => {
-    v.moved = true;
+    if (performance.now() - v.t0 > 400) v.moved = true;  // 剛跳過來時的慣性滾動不打斷定位
     if (!e.ctrlKey) return;
     e.preventDefault();
     pinch += e.deltaY;
@@ -1987,22 +2015,32 @@ function textNodeAt(blk, o) {
   }
   return last ? [last, last.data.length] : null;
 }
+// 目標在視區的「舒適範圍」裡（上方留一成、下方留兩成）就不必滾
+function inView(box, rr) {
+  const br = box.getBoundingClientRect(), h = box.clientHeight;
+  return rr.top - br.top >= h * 0.1 && rr.bottom - br.top <= h * 0.8;
+}
 function selectReaderRange(s, e) {
   const b1 = readerBlockAt(s), b2 = readerBlockAt(e) || b1;
   if (!b1) return;
-  b1.scrollIntoView({ block: 'center' });          // 先讓這塊排版（content-visibility），再取位置
-  requestAnimationFrame(() => {
-    const p = textNodeAt(b1, s), q = textNodeAt(b2, e);
-    if (!p || !q) return;
-    const r = document.createRange();
-    r.setStart(p[0], p[1]);
-    r.setEnd(q[0], q[1]);
-    const sel = window.getSelection();
-    sel.removeAllRanges();
-    sel.addRange(r);
-    const rd = $('#reader'), rr = r.getBoundingClientRect(), br = rd.getBoundingClientRect();
-    rd.scrollTop += rr.top - br.top - rd.clientHeight / 3;
-  });
+  const p = textNodeAt(b1, s), q = textNodeAt(b2, e);
+  if (!p || !q) return;
+  const r = document.createRange();
+  r.setStart(p[0], p[1]);
+  r.setEnd(q[0], q[1]);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(r);
+  const rd = $('#reader');
+  const place = () => {
+    const rr = r.getBoundingClientRect();
+    if (!rr.height) return false;                         // 這塊還沒排版（content-visibility）
+    if (!inView(rd, rr)) rd.scrollTop += rr.top - rd.getBoundingClientRect().top - rd.clientHeight / 3;
+    return true;
+  };
+  if (place()) return;
+  b1.scrollIntoView({ block: 'center' });                 // 先讓這塊排版，再一次定到上方三分之一
+  if (!place()) requestAnimationFrame(place);
 }
 function gotoText(s, e) {
   S.pendingSel = [s, e];
@@ -2310,7 +2348,8 @@ function gotoHit(i) {
   if (old) $$(`mark[data-i="${S.hit}"]`, $('#reader')).forEach(m => m.classList.remove('cur'));
   S.hit = i;
   $$(`mark[data-i="${i}"]`, $('#reader')).forEach(m => m.classList.add('cur'));
-  S.hitEls[i].scrollIntoView({ block: 'center' });
+  const rd = $('#reader'), el = S.hitEls[i], rr = el.getBoundingClientRect();
+  if (!rd || !rr.height || !inView(rd, rr)) el.scrollIntoView({ block: 'center' });
   renderHitbar();
 }
 
@@ -3170,20 +3209,36 @@ function readerMenu(x, y, pdf) {
   ].filter(Boolean);
   showMenu(x, y, items.length ? items : [{ label: '沒有可用的操作', disabled: true }]);
 }
-// 雙擊全文裡命中的詞：在原件中查看（原件上雙擊命中處則回到全文）
+// ---- 雙擊命中：全文 → 原件、原件 → 全文
+// 自己判斷雙擊、在第二下按下時就跳，不等瀏覽器的 dblclick：第一下落在已選中的字上時 WebKit 會當成拖動，
+// 兩下之間頁面有變化、觸控板輕微移動等都可能讓 dblclick 丟失。兩下須落在同一處命中上。
+const DBL_MS = 500;
+let lastDown = null;
+function secondDown(e, key) {
+  const now = performance.now(), p = lastDown;
+  lastDown = { t: now, x: e.clientX, y: e.clientY, key };
+  if (!key || !p || p.key !== key) return false;
+  if (now - p.t > DBL_MS && e.detail < 2) return false;
+  if (Math.abs(e.clientX - p.x) + Math.abs(e.clientY - p.y) > 12) return false;
+  lastDown = null;                                         // 第三下不再算
+  return true;
+}
+// 按在選區裡會被當成拖動選中的文字：先取消選區
+function dropSelectionAt(el) {
+  const sel = window.getSelection();
+  if (sel && !sel.isCollapsed && sel.containsNode(el, true)) sel.removeAllRanges();
+}
 document.addEventListener('mousedown', e => {
-  if (e.detail > 1 && e.target.closest && e.target.closest('#reader.can-orig mark[data-i]')) e.preventDefault();   // 不選詞
-});
-document.addEventListener('dblclick', e => {
-  const m = e.target.closest && e.target.closest('#reader.can-orig mark[data-i]');
-  if (!m || !S.spans) return;
-  const i = +m.dataset.i, sp = S.spans[i];
+  if (e.button !== 0 || !e.target.closest || e.target.closest('#pdfv')) return;   // 原件由查看器自己處理
+  const m = e.target.closest('#reader.can-orig mark[data-i]');
+  if (!secondDown(e, m ? 'r' + m.dataset.i : null)) { if (m) dropSelectionAt(m); return; }
+  const i = +m.dataset.i, sp = S.spans && S.spans[i];
   if (!sp) return;
-  e.preventDefault();
+  e.preventDefault();                                      // 不選詞
   window.getSelection().removeAllRanges();
   S.hit = i;
   locateInOrig(sp[0], sp[1]);
-});
+}, true);
 
 async function init() {
   try {

@@ -556,7 +556,7 @@ mark, .h1, .h2 { color: inherit; border-radius: 2px; }
 .pdfv-tl { position: absolute; inset: 0; pointer-events: none; user-select: text; -webkit-user-select: text; }
 .pdfv-tl span { position: absolute; line-height: 1; white-space: pre; color: transparent; pointer-events: auto; cursor: text; }
 .pdfv-tl span::selection { background: rgba(47, 98, 181, .30); color: transparent; }
-.pdfv.over-hit .pdfv-tl span { cursor: pointer; }
+.pdfv-tl span.h, .pdfv.over-hit .pdfv-tl span { cursor: pointer; }
 /* 檢索片段裡的命中：懸停時右側預覽跳過去 */
 /* 有作用的懸停：外面套一個小框（參照「對勘」） */
 .item.sel .snip .sh.hot, .reader.can-orig mark:hover {
