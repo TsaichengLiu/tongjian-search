@@ -1865,6 +1865,10 @@ function bindViewer(box) {
   v.rehover = () => { if (px >= 0 && !raf) raf = requestAnimationFrame(updHov); };
   box.addEventListener('mousemove', e => { px = e.clientX; py = e.clientY; v.rehover(); });
   box.addEventListener('mouseleave', () => { px = -1; if (V === v) setHov(null); });
+  box.addEventListener('dblclick', e => {
+    const h = hitAt(e);
+    if (h) { e.preventDefault(); window.getSelection().removeAllRanges(); gotoText(h.s, h.e); }
+  });
   box.addEventListener('scroll', () => {
     v.rehover();
     if (!v.sraf) v.sraf = setTimeout(() => { v.sraf = 0; if (V === v) syncPages(); }, 50);
@@ -1873,15 +1877,8 @@ function bindViewer(box) {
   box.addEventListener('mousedown', e => {
     const r = box.getBoundingClientRect();
     if (e.button !== 0 || e.clientX - r.left > box.clientWidth || e.clientY - r.top > box.clientHeight) return;
-    const h = hitAt(e);
-    if (secondDown(e, h ? 'o' + h.pg.n + ':' + h.s : null)) {
-      e.preventDefault();
-      window.getSelection().removeAllRanges();
-      return gotoText(h.s, h.e);
-    }
     box.focus({ preventScroll: true });
-    const sp = e.target.closest('.pdfv-tl span');
-    if (sp) { dropSelectionAt(sp); return; }               // 在字上按下：交給瀏覽器選字
+    if (e.target.closest('.pdfv-tl span')) return;        // 在字上按下：交給瀏覽器選字
     e.preventDefault();
     if (!e.shiftKey) window.getSelection().removeAllRanges();
     const sx = e.clientX, sy = e.clientY, sl = box.scrollLeft, st = box.scrollTop;
@@ -3209,36 +3206,20 @@ function readerMenu(x, y, pdf) {
   ].filter(Boolean);
   showMenu(x, y, items.length ? items : [{ label: '沒有可用的操作', disabled: true }]);
 }
-// ---- 雙擊命中：全文 → 原件、原件 → 全文
-// 自己判斷雙擊、在第二下按下時就跳，不等瀏覽器的 dblclick：第一下落在已選中的字上時 WebKit 會當成拖動，
-// 兩下之間頁面有變化、觸控板輕微移動等都可能讓 dblclick 丟失。兩下須落在同一處命中上。
-const DBL_MS = 500;
-let lastDown = null;
-function secondDown(e, key) {
-  const now = performance.now(), p = lastDown;
-  lastDown = { t: now, x: e.clientX, y: e.clientY, key };
-  if (!key || !p || p.key !== key) return false;
-  if (now - p.t > DBL_MS && e.detail < 2) return false;
-  if (Math.abs(e.clientX - p.x) + Math.abs(e.clientY - p.y) > 12) return false;
-  lastDown = null;                                         // 第三下不再算
-  return true;
-}
-// 按在選區裡會被當成拖動選中的文字：先取消選區
-function dropSelectionAt(el) {
-  const sel = window.getSelection();
-  if (sel && !sel.isCollapsed && sel.containsNode(el, true)) sel.removeAllRanges();
-}
+// 雙擊全文裡命中的詞：在原件中查看（原件上雙擊命中處則回到全文）
 document.addEventListener('mousedown', e => {
-  if (e.button !== 0 || !e.target.closest || e.target.closest('#pdfv')) return;   // 原件由查看器自己處理
-  const m = e.target.closest('#reader.can-orig mark[data-i]');
-  if (!secondDown(e, m ? 'r' + m.dataset.i : null)) { if (m) dropSelectionAt(m); return; }
-  const i = +m.dataset.i, sp = S.spans && S.spans[i];
+  if (e.detail > 1 && e.target.closest && e.target.closest('#reader.can-orig mark[data-i]')) e.preventDefault();   // 不選詞
+});
+document.addEventListener('dblclick', e => {
+  const m = e.target.closest && e.target.closest('#reader.can-orig mark[data-i]');
+  if (!m || !S.spans) return;
+  const i = +m.dataset.i, sp = S.spans[i];
   if (!sp) return;
-  e.preventDefault();                                      // 不選詞
+  e.preventDefault();
   window.getSelection().removeAllRanges();
   S.hit = i;
   locateInOrig(sp[0], sp[1]);
-}, true);
+});
 
 async function init() {
   try {
