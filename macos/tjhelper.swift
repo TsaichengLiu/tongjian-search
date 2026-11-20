@@ -2,7 +2,9 @@
 //   tjhelper pdftext <file.pdf>   用 PDFKit 抽取文字，頁與頁之間輸出 \f
 //   tjhelper trash <path>         移到廢紙簍（可在訪達中「放回原處」）
 //   tjhelper thumb <path> <out.jpg> [size]   用 QuickLook 生成縮略圖
-//   tjhelper render <file.pdf> <page> [width]   把 PDF 的一頁渲染成 JPEG，寫到標準輸出（大 PDF 逐頁預覽用）
+//   tjhelper render <file.pdf> <page> [width]   把 PDF 的一頁渲染成 JPEG，寫到標準輸出（原件逐頁預覽用）
+//   tjhelper boxes <file.pdf> <page>   這一頁文字層的逐字位置 → JSON {"s": 本頁文字, "b": [[x,y,w,h] 或 0, …]}
+//                                       （按 UTF-16 單位一一對應；坐標以渲染圖左上角為原點、萬分之一為單位，已計入頁面旋轉）
 //   tjhelper watch <dir>...       用 FSEvents 監聽變化，每條輸出「flags\tpath\0」；stdin 關閉即退出
 import Foundation
 import ImageIO
@@ -78,6 +80,36 @@ case "render":
     CGImageDestinationAddImage(dst, img, [kCGImageDestinationLossyCompressionQuality: 0.82] as CFDictionary)
     if !CGImageDestinationFinalize(dst) { fail("無法編碼") }
     FileHandle.standardOutput.write(data as Data)
+case "boxes":
+    guard args.count >= 4, let pno = Int(args[3]) else { fail("usage: tjhelper boxes <file.pdf> <page>", 2) }
+    guard let doc = PDFDocument(url: url) else { fail("無法打開 PDF") }
+    if doc.isLocked && !doc.unlock(withPassword: "") { fail("PDF 已加密") }
+    guard pno >= 1, pno <= doc.pageCount, let page = doc.page(at: pno - 1) else { fail("頁碼超出範圍", 3) }
+    let str = page.string ?? ""
+    let ns = str as NSString
+    let box = page.bounds(for: .cropBox)
+    let rot = ((page.rotation % 360) + 360) % 360
+    let W = box.width, H = box.height
+    var out: [Any] = []
+    out.reserveCapacity(ns.length)
+    for i in 0..<ns.length {
+        // 用單字選區的範圍：characterBounds 對不少中文 PDF 給出錯位的框，掃描件的 OCR 文字層則常常是空的
+        var r = page.selection(for: NSRange(location: i, length: 1))?.bounds(for: page) ?? .zero
+        if r.isEmpty || r.width <= 0 { r = page.characterBounds(at: i) }
+        if r.isEmpty || r.isNull || r.width <= 0 || r.height <= 0 || W <= 0 || H <= 0 { out.append(0); continue }
+        let x0 = r.minX - box.minX, x1 = r.maxX - box.minX, y0 = r.minY - box.minY, y1 = r.maxY - box.minY
+        var X0: CGFloat, X1: CGFloat, Y0: CGFloat, Y1: CGFloat     // 顯示方向、左上為原點、0…1
+        switch rot {
+        case 90: X0 = y0 / H; X1 = y1 / H; Y0 = x0 / W; Y1 = x1 / W
+        case 180: X0 = 1 - x1 / W; X1 = 1 - x0 / W; Y0 = y0 / H; Y1 = y1 / H
+        case 270: X0 = 1 - y1 / H; X1 = 1 - y0 / H; Y0 = 1 - x1 / W; Y1 = 1 - x0 / W
+        default: X0 = x0 / W; X1 = x1 / W; Y0 = 1 - y1 / H; Y1 = 1 - y0 / H
+        }
+        out.append([Int((X0 * 10000).rounded()), Int((Y0 * 10000).rounded()),
+                    Int(((X1 - X0) * 10000).rounded()), Int(((Y1 - Y0) * 10000).rounded())])
+    }
+    guard let data = try? JSONSerialization.data(withJSONObject: ["s": str, "b": out]) else { fail("無法輸出") }
+    FileHandle.standardOutput.write(data)
 case "thumb":
     guard args.count >= 4 else { fail("usage: tjhelper thumb <path> <out.jpg> [size]", 2) }
     let out = URL(fileURLWithPath: args[3])

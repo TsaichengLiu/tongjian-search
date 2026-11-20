@@ -61,6 +61,9 @@ DEFAULT_SETTINGS = {
     "scope": "name",
     "fuzzy": "0",
     "fuzzy_sim": "0.7",
+    "find_fuzzy": "0",
+    "find_sim": "0.7",
+    "pdf_view": "pages",
 }
 # 含這些文件的文件夾視為代碼項目，整個跳過
 PROJECT_MARKERS = {"package.json", "pyproject.toml", "setup.py", "requirements.txt", "Cargo.toml",
@@ -109,6 +112,28 @@ def parse_query(q):
             groups.append({"neg": neg, "alts": alts})
         pend_or = False
     return groups
+
+
+def align_boxes(seg, s, b):
+    """輔助工具給的逐字位置（按 UTF-16 單位，對應 PDFKit 的頁面文字 s）→ 全文本頁 seg 逐字（按碼位）。
+    抽取時只做過「頁內 \\f→\\n、去掉 \\x00」，這裡照做一遍；萬一對不上，用最長公共片段對齊，對不上的字不標。"""
+    chars, boxes, u = [], [], 0
+    for c in s:
+        box = b[u] if u < len(b) else 0
+        u += 2 if ord(c) > 0xFFFF else 1
+        if c == "\x00":
+            continue
+        chars.append("\n" if c == "\f" else c)
+        boxes.append(box)
+    text = "".join(chars)
+    if text == seg:
+        return boxes
+    import difflib
+    out = [0] * len(seg)
+    sm = difflib.SequenceMatcher(None, seg, text, autojunk=False)
+    for a, j, size in sm.get_matching_blocks():
+        out[a:a + size] = boxes[j:j + size]
+    return out
 
 
 def fuzzy_param(p):
@@ -408,6 +433,7 @@ class Library(object):
         self.thumb_sem = threading.Semaphore(3)
         self.page_sem = threading.Semaphore(2)    # 大 PDF 逐頁渲染：同時至多兩個輔助進程
         self.page_cache = LRU(12 * 1000 * 1000)  # 最近渲染的頁（JPEG，約一二十頁），空閒時清空
+        self.box_cache = LRU(6 * 1000 * 1000)    # 原件標註用的逐字位置（輔助工具輸出的 JSON），空閒時清空
         # 按數據庫分開存放：清理時只會刪本數據庫已不存在的文件的縮略圖
         self.thumb_dir = os.path.join(os.path.expanduser("~/Library/Caches/TongJian"), "thumbs-" +
                                       hashlib.sha1(os.path.realpath(db_path).encode("utf-8")).hexdigest()[:10])
@@ -578,6 +604,7 @@ class Library(object):
                     if now - self.last_use > 300:
                         self.text_cache.clear()     # 5 分鐘沒有檢索：清空全文緩存
                         self.page_cache.clear()
+                        self.box_cache.clear()
                         self.norm.drop_content_maps()   # 以及模糊檢索的字表、名稱表（用時幾毫秒重建）
                         self.names.drop_fuzzy()
                     release_memory()
@@ -1600,7 +1627,7 @@ class Library(object):
     # 「恢復默認設置」會重置的項；自定義異體字與排除列表另行勾選
     RESETTABLE = ("cross_punct", "rescan_minutes", "watch", "skip_projects", "code_fulltext", "mode", "scope",
                   "sort", "collation", "sidebar_w", "list_w", "folder_view", "fuzzy", "fuzzy_sim",
-                  "reader_size")
+                  "reader_size", "find_fuzzy", "find_sim", "pdf_view")
 
     def reset_settings(self, variants=False, excludes=False):
         keys = list(self.RESETTABLE) + (["custom_variants"] if variants else []) + (["excludes"] if excludes else [])
@@ -1805,6 +1832,57 @@ class Library(object):
                 raise UserError("無法渲染這一頁：%s" % pr.stderr.decode("utf-8", "replace").strip())
             self.page_cache.put(key, pr.stdout, len(pr.stdout))
             return pr.stdout
+
+    def page_boxes(self, fid, page):
+        """原件上的標註：這一頁文字層的逐字位置，對回全文。
+        返回 {"o0": 本頁在全文中的起點, "boxes": [[x, y, w, h] 或 0, …]}，按 UTF-16 單位與全文一一對應（給瀏覽器用），
+        坐標以頁面圖左上角為原點、萬分之一為單位。"""
+        self.last_use = _now()
+        r = self._row(fid)
+        empty = {"o0": 0, "boxes": []}
+        if r["kind"] != "pdf" or r["status"] != 1 or not self.helper or not os.path.exists(r["path"]):
+            return empty
+        text = self.get_text(fid)
+        if not text:
+            return empty
+        k, o0 = 1, 0
+        while k < page:
+            j = text.find("\f", o0)
+            if j < 0:
+                return empty
+            o0, k = j + 1, k + 1
+        j = text.find("\f", o0)
+        seg = text[o0:j if j >= 0 else len(text)]
+        conv = u16_mapper(text)
+        res = {"o0": conv(o0) if conv else o0, "boxes": []}
+        if not seg.strip():
+            return res
+        key = (fid, int(r["mtime"] or 0), int(page))
+        hit = self.box_cache.get(key)
+        js = hit[0] if hit is not None else None
+        if js is None:
+            with self.page_sem:
+                try:
+                    pr = subprocess.run([self.helper, "boxes", r["path"], str(int(page))],
+                                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=60)
+                    js = pr.stdout if pr.returncode == 0 else b""
+                except subprocess.TimeoutExpired:
+                    js = b""
+            self.box_cache.put(key, js, len(js) + 64)
+        try:
+            d = json.loads(js.decode("utf-8")) if js else {}
+        except ValueError:
+            d = {}
+        boxes = align_boxes(seg, d.get("s") or "", d.get("b") or [])
+        if conv:                                   # 擴展區漢字在瀏覽器裡佔兩個單位
+            out = []
+            for ch, b in zip(seg, boxes):
+                out.append(b)
+                if ord(ch) > 0xFFFF:
+                    out.append(b)
+            boxes = out
+        res["boxes"] = boxes
+        return res
 
     def _prune_thumbs(self):
         """刪掉已不在索引中的文件的縮略圖、文件改動前的舊縮略圖，總量超過上限時按最近使用時間淘汰。"""

@@ -245,6 +245,9 @@ class Handler(BaseHTTPRequestHandler):
     def api_preview(self, p, b):
         return App.lib.preview(int(p["id"]), p.get("q", ""), p.get("mode", "full"), fz=fuzzy_param(p))
 
+    def api_pageboxes(self, p, b):
+        return App.lib.page_boxes(int(p["id"]), int(p.get("p") or 1))
+
     def api_find(self, p, b):
         return App.lib.find_in(int(p["id"]), p.get("q", ""), p.get("mode", "full"), fuzzy_param(p))
 
@@ -383,7 +386,7 @@ class Handler(BaseHTTPRequestHandler):
 
 SETTING_KEYS = ("custom_variants", "excludes", "cross_punct", "rescan_minutes", "watch", "skip_projects",
                 "code_fulltext", "mode", "scope", "sidebar_w", "list_w", "sort", "collation", "folder_view",
-                "fuzzy", "fuzzy_sim", "reader_size")
+                "fuzzy", "fuzzy_sim", "reader_size", "find_fuzzy", "find_sim", "pdf_view")
 
 
 class Server(ThreadingHTTPServer):

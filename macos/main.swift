@@ -70,13 +70,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         // 不寫磁盤：網頁緩存、LocalStorage 等都只在內存裡（縮略圖由後台服務自己緩存，設置存在資料庫）
         cfg.websiteDataStore = .nonPersistent()
         cfg.userContentController.add(self, name: "tj")
-        cfg.preferences.setValue(true, forKey: "developerExtrasEnabled")
-        web = WKWebView(frame: window.contentView!.bounds, configuration: cfg)
+        web = TJWebView(frame: window.contentView!.bounds, configuration: cfg)   // 右鍵菜單見 webmenu.swift
         web.autoresizingMask = [.width, .height]
         web.navigationDelegate = self
         web.uiDelegate = self
         web.setValue(false, forKey: "drawsBackground")
-        if #available(macOS 13.3, *) { web.isInspectable = true }
         window.contentView!.addSubview(web)
         window.makeKeyAndOrderFront(nil)
         NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: window,
@@ -172,6 +170,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     // MARK: JS 橋接
     func userContentController(_ uc: WKUserContentController, didReceive msg: WKScriptMessage) {
         guard let body = msg.body as? [String: Any], let cmd = body["cmd"] as? String else { return }
+        if cmd == "menu" { (web as? TJWebView)?.setMenuContext(body); return }
         let id = body["id"] as? Int ?? 0
         if cmd == "pickFolder" {
             let panel = NSOpenPanel()

@@ -48,12 +48,13 @@ const S = {
   token: window.TJ.token, native: window.TJ.native,
   roots: [], tags: [], stats: {}, status: {}, settings: {}, meta: {}, tools: {},
   q: '', mode: 'full', scope: 'name', sort: 'relevance', limit: 200, projects: [],
-  fuzzy: false, fzSim: '0.7', find: { open: false, q: '', res: null, busy: false },
+  fuzzy: false, fzSim: '0.7', find: { open: false, q: '', res: null, busy: false, fz: false, sim: '0.7' },
   filter: { root: null, dir: null, kind: null, tag: null, starred: false, only: null },
   res: null, items: [], cur: null, sel: new Set(), anchor: null,
   pv: null, pvTab: 'text', pvTabPref: 'text', hit: 0, hitEls: [], pendingPos: null,
   dirs: {}, openRoots: new Set(), openDirs: new Set(),
-  readerSize: 16, lastRescan: 0, fullPdf: new Set(), pg: null, pgLast: {},
+  readerSize: 16, lastRescan: 0, fullPdf: new Set(), pgLast: {}, pdfMode: 'pages', pdfZoom: null, pdfFocus: null,
+  pendingSel: null, ctx: null,
 };
 
 async function api(path, body) {
@@ -236,6 +237,7 @@ let nativeSeq = 0;
 window.TJNative = {
   resolve(id, v) { const f = nativeCbs[id]; delete nativeCbs[id]; f && f(v); },
   focus() { maybeRescan(); },
+  menu(action) { ctxAction(action); },        // 外殼的右鍵菜單裡、通檢自己的命令
 };
 async function pickFolder(prompt) {
   if (S.native && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.tj) {
@@ -1054,6 +1056,7 @@ function chooseTab(pv, pref) {
 }
 function renderPreview() {
   const el = $('#preview');
+  dropViewer();
   if (S.sel.size > 1) {
     const n = S.sel.size, items = selItems();
     const size = items.reduce((a, b) => a + (b.size || 0), 0);
@@ -1277,6 +1280,7 @@ function renderPreviewBody() {
   const pv = S.pv, body = $('#pv-body');
   if (!pv || !body) return;
   $$('#pv-tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === S.pvTab));
+  if (S.pvTab !== 'orig') dropViewer();
   if (S.pvTab === 'text') return renderReader(body);
   if (S.pvTab === 'orig') return renderOrig(body);
   return renderInfo(body);
@@ -1290,70 +1294,481 @@ function statusMsg(pv) {
 }
 function renderOrig(body) {
   const pv = S.pv;
-  const page = S.origPage ? '#page=' + S.origPage : '';
+  const start = S.origPage || 0;
   S.origPage = null;
+  dropViewer();
   if (!pv.exists) { body.innerHTML = `<div class="pv-msg">文件已不在原處。</div>`; return; }
-  if (pv.kind === 'pdf' && isBigPdf(pv) && !S.fullPdf.has(pv.id)) return renderPager(body, +page.slice(6) || 0);
-  if (pv.kind === 'pdf') body.innerHTML = `<iframe class="frame" src="${rawUrl(pv.id, page)}"></iframe>`;
-  else if (pv.kind === 'image') body.innerHTML = `<div class="img-view"><img src="${rawUrl(pv.id)}" alt=""></div>`;
+  if (pv.kind === 'pdf') return useSystemPdf(pv) ? renderSystemPdf(body, start) : renderViewer(body, start);
+  if (pv.kind === 'image') body.innerHTML = `<div class="img-view"><img src="${rawUrl(pv.id)}" alt=""></div>`;
   else if (pv.ext === 'html' || pv.ext === 'htm') body.innerHTML = `<iframe class="frame" sandbox="" src="${rawUrl(pv.id)}"></iframe>`;
   else body.innerHTML = `<div class="pv-msg">這類文件不能在通檢裡直接顯示。<br>
     <button class="btn" data-act="ql">${I.eye}快速查看</button> <button class="btn primary" data-act="open">${I.open}打開</button></div>`;
 }
-// ---- 大 PDF 逐頁預覽：後台用 PDFKit 渲染當前頁（不寫磁盤，只在內存裡留最近幾頁），WebKit 不必載入整本
-let pgSeq = 0;
-function renderPager(body, start) {
-  const pv = S.pv, n = pv.pages || 0;
-  const p = Math.max(1, Math.min(n || 1, start || S.pgLast[pv.id] || 1));
-  const fit = S.pgFit || 'page';
-  S.pg = { id: pv.id, page: p };
+
+// ===================================================================== 原件：逐頁圖片，可標註
+// 頁面圖和文字層的逐字位置都由後台現算（輔助進程用完即退，結果只在內存裡留最近幾頁）。
+// 這裡只載入視區上下一屏內的頁，離開後卸下圖片和標註，交還內存。
+// 標註：命中（黃底）、從全文定位過來的位置（紅框）、懸停處的文本塊（藍虛框，單擊跳到全文並選中這段）。
+const PDFV_ZOOMS = [0.5, 0.67, 0.8, 1, 1.25, 1.5, 2, 2.5, 3];
+const SVGNS = 'http://www.w3.org/2000/svg';
+const CHEV_L = I.chev.replace('<svg', '<svg style="transform:rotate(180deg)"');
+let V = null;
+const useSystemPdf = pv => S.fullPdf.has(pv.id) || (S.pdfMode === 'system' && !isBigPdf(pv));
+function dropViewer() {
+  if (V) { if (V.io) V.io.disconnect(); V = null; }
+}
+function renderSystemPdf(body, start) {
+  const pv = S.pv;
+  body.innerHTML = `<div class="pgbar"><span class="pg-hint">系統 PDF 閱讀器${isBigPdf(pv) ? `（${fmtSize(pv.size)}，載入要幾秒）` : ''}：可選字，不能標註</span>
+    <span class="grow"></span><button class="btn mini" data-act="pg-pages" title="逐頁顯示：標出命中，懸停對照全文">逐頁（可標註）</button></div>
+    <iframe class="frame" src="${rawUrl(pv.id, start ? '#page=' + start : '')}"></iframe>`;
+}
+// 全文（UTF-16 下標）的分頁
+function pageStarts(pv) {
+  if (pv._ps) return pv._ps;
+  const t = pv.text || '', ps = [0];
+  for (let i = t.indexOf('\f'); i >= 0; i = t.indexOf('\f', i + 1)) ps.push(i + 1);
+  return (pv._ps = ps);
+}
+function pageOfOffset(pv, o) {
+  const ps = pageStarts(pv);
+  let lo = 0, hi = ps.length - 1;
+  while (lo < hi) { const m = (lo + hi + 1) >> 1; if (ps[m] <= o) lo = m; else hi = m - 1; }
+  return lo + 1;
+}
+function pageHasText(pv, n) {
+  const ps = pageStarts(pv), t = pv.text || '';
+  if (n > ps.length) return false;
+  return /\S/.test(t.slice(ps[n - 1], n < ps.length ? ps[n] - 1 : t.length));
+}
+function annotSpans() {
+  const pv = S.pv;
+  const src = findActive() ? (findReady() ? S.find.res.spans : []) : (pv.spans || []);
+  return mergeSpans(src);
+}
+function renderViewer(body, start) {
+  const pv = S.pv, n = Math.max(1, pv.pages || 1);
+  V = { id: pv.id, n, zi: S.pdfZoom != null ? S.pdfZoom : 3, pages: [], io: null, cur: 1, marked: 0, unmarked: 0,
+    hasText: pv.status === 1 && pv.text != null && !pv.sparse, spans: annotSpans(), focus: null, hov: null,
+    moved: false, raf: 0, sraf: 0 };
+  if (S.pdfFocus && S.pdfFocus.id === pv.id) V.focus = S.pdfFocus;
+  S.pdfFocus = null;
   body.innerHTML = `<div class="pgbar">
-      <button class="icon-btn" data-act="pg-prev" title="上一頁（←）">${I.chev.replace('<svg', '<svg style="transform:rotate(180deg)"')}</button>
-      <span class="pg-pos">第 <input id="pg-no" type="text" inputmode="numeric" autocomplete="off" value="${p}"> / ${fmtNum(n)} 頁</span>
+      <button class="icon-btn" data-act="pg-prev" title="上一頁（←）">${CHEV_L}</button>
+      <span class="pg-pos">第 <input id="pg-no" type="text" inputmode="numeric" autocomplete="off" value="1"> / ${fmtNum(n)} 頁</span>
       <button class="icon-btn" data-act="pg-next" title="下一頁（→）">${I.chev}</button>
       <span class="vsep"></span>
-      <button class="btn mini${fit === 'page' ? ' on' : ''}" data-act="pg-fit" data-fit="page" title="整頁顯示">整頁</button>
-      <button class="btn mini${fit === 'width' ? ' on' : ''}" data-act="pg-fit" data-fit="width" title="適合寬度">寬度</button>
+      <button class="icon-btn pg-z" data-act="pg-zout" title="縮小（−）">−</button>
+      <span class="pg-zl" id="pg-zl"></span>
+      <button class="icon-btn pg-z" data-act="pg-zin" title="放大（＋）">＋</button>
+      <span class="pg-hint" id="pg-hint"></span>
       <span class="grow"></span>
-      <span class="pg-hint" title="這個 PDF 很大（${fmtSize(pv.size)}，${fmtNum(n)} 頁），整本載入要好幾秒、佔用較多內存，所以逐頁顯示">逐頁顯示</span>
-      <button class="btn mini" data-act="pg-full" title="在通檢裡載入整個 PDF（可連續滾動、選字，但要等幾秒）">載入整本</button>
-    </div>
-    <div class="pgview fit-${fit}" id="pgview"><img id="pg-img" alt=""><div class="pg-msg" id="pg-msg" hidden></div></div>`;
-  const inp = $('#pg-no', body);
-  inp.addEventListener('keydown', e => {
-    if (e.key === 'Enter') { e.preventDefault(); const v = parseInt(inp.value, 10); if (v) showPage(v); inp.blur(); }
-    else if (e.key === 'Escape') { inp.value = S.pg.page; inp.blur(); }
-  });
-  inp.addEventListener('focus', () => inp.select());
-  showPage(p);
+      <button class="btn mini" data-act="pg-full" title="${isBigPdf(pv) ? `用系統 PDF 閱讀器顯示整本：這個 PDF 很大（${fmtSize(pv.size)}），要等幾秒、佔用較多內存` : '用系統 PDF 閱讀器顯示整本：可選字，但不能標註'}">系統閱讀器</button>
+    </div><div class="pdfv" id="pdfv" tabindex="0"></div>`;
+  const box = $('#pdfv', body);
+  V.box = box;
+  box.style.setProperty('--z', PDFV_ZOOMS[V.zi]);
+  $('#pg-zl', body).textContent = Math.round(PDFV_ZOOMS[V.zi] * 100) + '%';
+  const tpl = document.createElement('div');
+  tpl.className = 'pdfv-page';
+  tpl.innerHTML = '<span class="pdfv-num"></span><img alt="" draggable="false">';
+  const frag = document.createDocumentFragment();
+  for (let k = 1; k <= n; k++) {
+    const el = tpl.cloneNode(true);
+    el.dataset.n = k;
+    el.firstChild.textContent = k;
+    frag.appendChild(el);
+    const pg = { n: k, el, img: el.lastChild, w: 0, aspect: 0, marks: null, asked: false, timer: 0, svg: null, hovG: null, blocks: null };
+    pg.img.onload = () => { setAspect(pg, pg.img.naturalHeight / Math.max(1, pg.img.naturalWidth)); drawMarks(pg); };
+    pg.img.onerror = () => { if (pg.img.getAttribute('src')) { pg.w = 0; pg.el.classList.add('err'); } };
+    V.pages.push(pg);
+  }
+  box.appendChild(frag);
+  let p0 = start || (V.focus ? pageOfOffset(pv, V.focus.s) : 0) || S.pgLast[pv.id] || 1;
+  V.cur = Math.max(1, Math.min(n, p0));
+  updHint();
+  bindViewer(box);
+  const v = V;
+  box.scrollTop = V.pages[V.cur - 1].el.offsetTop - 10;
+  updPage();
+  // 進入視區（上下各多一屏）停留片刻才載入：快速翻過的頁不請求；離開後卸下圖片和標註，交還內存
+  V.io = new IntersectionObserver(es => es.forEach(e => {
+    const pg = v.pages[+e.target.dataset.n - 1];
+    clearTimeout(pg.timer);
+    if (e.isIntersecting) pg.timer = setTimeout(() => loadPage(v, pg), 120);
+    else unloadPage(pg);
+  }), { root: box, rootMargin: '100% 0px' });
+  V.pages.forEach(pg => V.io.observe(pg.el));
 }
-function pageUrl(id, p) {
-  const v = $('#pgview');
-  const w = Math.min(3200, Math.max(800, Math.ceil((v ? v.clientWidth : 900) * (window.devicePixelRatio || 1) / 200) * 200));
-  return `/page/${id}/${p}?w=${w}&t=${encodeURIComponent(S.token)}`;
-}
-function showPage(p) {
+function updHint() {
+  const el = $('#pg-hint');
+  if (!el || !V) return;
   const pv = S.pv;
-  if (!pv || !S.pg || S.pg.id !== pv.id || !$('#pg-img')) return;
-  const n = pv.pages || 0;
-  p = Math.max(1, n ? Math.min(n, p) : p);
-  S.pg.page = p;
-  S.pgLast[pv.id] = p;
-  const inp = $('#pg-no'), msg = $('#pg-msg');
-  if (inp && document.activeElement !== inp) inp.value = p;
-  const url = pageUrl(pv.id, p), seq = ++pgSeq;
-  const slow = setTimeout(() => { if (seq === pgSeq) { msg.textContent = '渲染中…'; msg.hidden = false; } }, 150);
-  const im = new Image();
-  im.onload = () => {
-    clearTimeout(slow);
-    if (seq !== pgSeq || !$('#pg-img')) return;
-    $('#pg-img').src = url;
-    msg.hidden = true;
-    $('#pgview').scrollTop = 0;
-    if (p < n) { const pre = new Image(); pre.src = pageUrl(pv.id, p + 1); }   // 預先渲染下一頁
-  };
-  im.onerror = () => { clearTimeout(slow); if (seq === pgSeq) { msg.textContent = '這一頁無法顯示'; msg.hidden = false; } };
-  im.src = url;
+  if (pv.sparse || pv.status !== 1) el.textContent = '掃描件：沒有可標註的文字層';
+  else if (V.marked) el.textContent = (V.spans.length ? '黃＝命中 · ' : '') + '懸停對照文字，單擊跳到全文';
+  else if (V.unmarked) el.textContent = '這幾頁的文字層沒有位置信息，無法標註';
+  else el.textContent = '';
+}
+function wantWidth() {
+  return Math.min(3200, Math.max(600, Math.ceil(V.box.clientWidth * PDFV_ZOOMS[V.zi] * (window.devicePixelRatio || 1) / 200) * 200));
+}
+function loadPage(v, pg) {
+  if (V !== v) return;
+  const w = wantWidth();
+  if (pg.w < w) {
+    pg.w = w;
+    pg.el.classList.remove('err');
+    pg.img.src = `/page/${v.id}/${pg.n}?w=${w}&t=${encodeURIComponent(S.token)}`;
+  }
+  if (v.hasText && !pg.asked && pageHasText(S.pv, pg.n)) {
+    pg.asked = true;
+    api(`pageboxes?id=${v.id}&p=${pg.n}`).then(d => {
+      if (V !== v || !pg.asked) return;
+      pg.marks = { o0: d.o0, boxes: d.boxes.map(b => b && [b[0] / 1e4, b[1] / 1e4, b[2] / 1e4, b[3] / 1e4]) };
+      pg.blocks = null;
+      if (d.boxes.some(Boolean)) v.marked++; else v.unmarked++;
+      updHint();
+      drawMarks(pg);
+    }).catch(() => {});
+  }
+}
+function unloadPage(pg) {
+  if (pg.w) { pg.img.removeAttribute('src'); pg.w = 0; }
+  if (pg.svg) { pg.svg.remove(); pg.svg = null; pg.hovG = null; }
+  pg.marks = null; pg.blocks = null; pg.asked = false;
+}
+// 各頁高寬比：第一頁載入後作為其餘未載入頁的默認值；視區之上的頁變高變矮時，眼前的內容不動
+function setAspect(pg, a) {
+  if (!V || !a || Math.abs(a - pg.aspect) < 1e-3) return;
+  const restore = anchorView();
+  if (!V.box.style.getPropertyValue('--pa')) V.box.style.setProperty('--pa', a.toFixed(4));
+  pg.aspect = a;
+  pg.el.style.aspectRatio = '1 / ' + a.toFixed(4);
+  restore();
+}
+function anchorView() {
+  const pg = V.pages[viewPage() - 1], box = V.box;
+  const top = pg.el.offsetTop, frac = (box.scrollTop - top) / (pg.el.offsetHeight || 1);
+  return () => { box.scrollTop = pg.el.offsetTop + frac * pg.el.offsetHeight; };
+}
+function viewPage() {
+  const y = V.box.scrollTop + V.box.clientHeight * 0.35;
+  let lo = 0, hi = V.pages.length - 1;
+  while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (V.pages[mid].el.offsetTop <= y) lo = mid; else hi = mid - 1; }
+  return lo + 1;
+}
+function updPage() {
+  if (!V) return;
+  V.cur = viewPage();
+  S.pgLast[V.id] = V.cur;
+  const go = $('#pg-no');
+  if (go && document.activeElement !== go) go.value = V.cur;
+}
+function toPage(n) {
+  if (!V || n < 1 || n > V.n) return;
+  V.moved = true;
+  V.box.scrollTop = V.pages[n - 1].el.offsetTop - 10;
+  updPage();
+}
+function vZoom(z) {
+  if (!V) return;
+  z = Math.max(0, Math.min(PDFV_ZOOMS.length - 1, z));
+  if (z === V.zi) return;
+  const restore = anchorView(), box = V.box, cx = (box.scrollLeft + box.clientWidth / 2) / Math.max(1, box.scrollWidth);
+  V.zi = S.pdfZoom = z;
+  box.style.setProperty('--z', PDFV_ZOOMS[z]);
+  $('#pg-zl').textContent = Math.round(PDFV_ZOOMS[z] * 100) + '%';
+  restore();
+  box.scrollLeft = cx * box.scrollWidth - box.clientWidth / 2;
+  for (let k = Math.max(1, V.cur - 2); k <= Math.min(V.n, V.cur + 2); k++) if (V.pages[k - 1].w) loadPage(V, V.pages[k - 1]);
+}
+// 相鄰的逐字框合成行（橫排）或列（豎排）
+function mergeBoxes(list) {
+  const out = [];
+  let r = null, last = null;
+  for (const b of list) {
+    if (!b) { r = last = null; continue; }
+    if (last) {
+      const [x, y, w, hh] = b, [lx, ly, lw, lh] = last;
+      const size = Math.max(Math.min(hh, lh), Math.min(w, lw));
+      const vOver = Math.min(y + hh, ly + lh) - Math.max(y, ly), hOver = Math.min(x + w, lx + lw) - Math.max(x, lx);
+      const hGap = x - (lx + lw), vGap = y - (ly + lh);
+      const row = vOver > 0.5 * Math.min(hh, lh) && hGap > -0.5 * size && hGap < 0.5 * size;
+      const col = hOver > 0.5 * Math.min(w, lw) && vGap > -0.5 * size && vGap < 0.5 * size;
+      if (row || col) {
+        const nx = Math.min(r[0], x), ny = Math.min(r[1], y);
+        r[2] = Math.max(r[0] + r[2], x + w) - nx; r[3] = Math.max(r[1] + r[3], y + hh) - ny; r[0] = nx; r[1] = ny;
+        last = b;
+        continue;
+      }
+    }
+    r = b.slice();
+    last = b;
+    out.push(r);
+  }
+  return out;
+}
+function spanBoxes(pg, s, e) {
+  const { o0, boxes } = pg.marks, t = S.pv.text, list = [];
+  for (let k = Math.max(s, o0), hi = Math.min(e, o0 + boxes.length); k < hi; k++) list.push(/\s/.test(t[k]) ? null : boxes[k - o0]);
+  return mergeBoxes(list);
+}
+// 文本塊＝抽出文字裡的一行（豎排即一列）
+function pageBlocks(pg) {
+  if (pg.blocks) return pg.blocks;
+  const { o0, boxes } = pg.marks, t = S.pv.text, out = [];
+  let a = 0;
+  for (let k = 0; k <= boxes.length; k++) {
+    const c = t[o0 + k];
+    if (k === boxes.length || c === '\n' || c === '\r') {
+      if (k > a) {
+        const list = [];
+        for (let j = a; j < k; j++) if (boxes[j] && !/\s/.test(t[o0 + j])) list.push(boxes[j]);
+        const rects = mergeBoxes(list);
+        if (rects.length) out.push({ a: o0 + a, b: o0 + k, rects });
+      }
+      a = k + 1;
+    }
+  }
+  return (pg.blocks = out);
+}
+function blockAt(pg, nx, ny) {
+  if (!pg.marks) return null;
+  const pad = 0.004;
+  for (const bl of pageBlocks(pg)) {
+    for (const r of bl.rects) {
+      if (nx >= r[0] - pad && nx <= r[0] + r[2] + pad && ny >= r[1] - pad && ny <= r[1] + r[3] + pad) return bl;
+    }
+  }
+  return null;
+}
+function addRect(svg, H, b, cls, pad) {
+  const r = document.createElementNS(SVGNS, 'rect');
+  r.setAttribute('x', (b[0] * 1000 - pad).toFixed(1)); r.setAttribute('y', (b[1] * H - pad).toFixed(1));
+  r.setAttribute('width', (b[2] * 1000 + 2 * pad).toFixed(1)); r.setAttribute('height', (b[3] * H + 2 * pad).toFixed(1));
+  r.setAttribute('class', cls);
+  svg.appendChild(r);
+  return r;
+}
+function drawMarks(pg) {
+  if (!V || !pg.marks || !pg.aspect) return;
+  if (pg.svg) pg.svg.remove();
+  const { o0, boxes } = pg.marks, end = o0 + boxes.length, H = 1000 * pg.aspect;
+  const svg = document.createElementNS(SVGNS, 'svg');
+  svg.setAttribute('viewBox', `0 0 1000 ${H.toFixed(1)}`);
+  svg.setAttribute('preserveAspectRatio', 'none');
+  for (const [s, e] of V.spans) {
+    if (e <= o0) continue;
+    if (s >= end) break;
+    spanBoxes(pg, s, e).forEach(b => addRect(svg, H, b, 'pm-hit', 1));
+  }
+  let foc = [];
+  if (V.focus && V.focus.s < end && Math.max(V.focus.e, V.focus.s + 1) > o0) {
+    if (V.focus.e > V.focus.s) foc = spanBoxes(pg, V.focus.s, V.focus.e);
+    else {
+      const bl = pageBlocks(pg).find(x => V.focus.s >= x.a && V.focus.s <= x.b);
+      foc = bl ? bl.rects : [];
+    }
+    foc.forEach(b => addRect(svg, H, b, 'pm-focus', 3));
+  }
+  pg.hovG = document.createElementNS(SVGNS, 'g');
+  pg.hovG.setAttribute('class', 'pm-hov');
+  svg.appendChild(pg.hovG);
+  pg.svg = svg;
+  pg.el.appendChild(svg);
+  // 從全文定位過來：標註到了把那處移到視區上部（用戶已自己翻動則不動）
+  if (foc.length && !V.focused && !V.moved) {
+    V.focused = true;
+    V.box.scrollTop = pg.el.offsetTop + foc[0][1] * pg.el.offsetHeight - V.box.clientHeight / 3;
+    updPage();
+  }
+}
+function pagePoint(e) {
+  const el = e.target.closest && e.target.closest('.pdfv-page');
+  if (!el || !V) return null;
+  const pg = V.pages[+el.dataset.n - 1], r = el.getBoundingClientRect();
+  return { pg, nx: (e.clientX - r.left) / r.width, ny: (e.clientY - r.top) / r.height };
+}
+function setHover(pg, bl) {
+  const cur = V.hov;
+  if (cur && cur.pg === pg && cur.bl === bl) return;
+  if (cur && cur.pg.hovG) cur.pg.hovG.textContent = '';
+  if (cur) cur.pg.el.removeAttribute('title');
+  V.hov = bl ? { pg, bl } : null;
+  V.box.classList.toggle('over-text', !!bl);
+  if (bl && pg.hovG) {
+    const H = 1000 * pg.aspect;
+    bl.rects.forEach(b => addRect(pg.hovG, H, b, 'pm-hover', 2));
+    const txt = S.pv.text.slice(bl.a, bl.b).trim();
+    pg.el.title = (txt.length > 60 ? txt.slice(0, 60) + '…' : txt) + '\n單擊：在全文中查看這段';
+  }
+}
+function bindViewer(box) {
+  const v = V;
+  const go = $('#pg-no');
+  go.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); const k = parseInt(go.value, 10); if (k) toPage(Math.max(1, Math.min(v.n, k))); go.blur(); box.focus({ preventScroll: true }); }
+    else if (e.key === 'Escape') { go.value = v.cur; go.blur(); }
+  });
+  go.addEventListener('focus', () => go.select());
+  box.addEventListener('scroll', () => { if (!v.sraf) v.sraf = setTimeout(() => { v.sraf = 0; if (V === v) updPage(); }, 50); });
+  box.addEventListener('mousemove', e => {
+    if (v.drag) return;
+    v.mev = e;
+    if (!v.raf) v.raf = requestAnimationFrame(() => {
+      v.raf = 0;
+      if (V !== v || !v.mev) return;
+      const p = pagePoint(v.mev);
+      setHover(p && p.pg, p && v.hasText ? blockAt(p.pg, p.nx, p.ny) : null);
+    });
+  });
+  box.addEventListener('mouseleave', () => { v.mev = null; if (V === v) setHover(null, null); });
+  // 拖動平移；不移動的單擊＝跳到全文的這段
+  box.addEventListener('mousedown', e => {
+    const r = box.getBoundingClientRect();
+    if (e.button !== 0 || e.clientX - r.left > box.clientWidth || e.clientY - r.top > box.clientHeight) return;
+    e.preventDefault();
+    box.focus({ preventScroll: true });
+    const sx = e.clientX, sy = e.clientY, sl = box.scrollLeft, st = box.scrollTop;
+    let moved = false;
+    const move = ev => {
+      if (!moved && Math.abs(ev.clientX - sx) + Math.abs(ev.clientY - sy) < 4) return;
+      moved = v.moved = v.drag = true;
+      box.classList.add('grabbing');
+      box.scrollLeft = sl - (ev.clientX - sx); box.scrollTop = st - (ev.clientY - sy);
+    };
+    const up = ev => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+      box.classList.remove('grabbing');
+      v.drag = false;
+      if (!moved && V === v) {
+        const p = pagePoint(ev), bl = p && v.hasText ? blockAt(p.pg, p.nx, p.ny) : null;
+        if (bl) gotoText(bl.a, bl.b);
+      }
+    };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+  });
+  let pinch = 0;
+  box.addEventListener('wheel', e => {
+    v.moved = true;
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    pinch += e.deltaY;
+    if (Math.abs(pinch) > 30) { vZoom(v.zi + (pinch < 0 ? 1 : -1)); pinch = 0; }
+  }, { passive: false });
+  box.addEventListener('keydown', e => {
+    const k = e.key;
+    if (k === 'ArrowRight' || k === 'PageDown') toPage(v.cur + 1);
+    else if (k === 'ArrowLeft' || k === 'PageUp') toPage(v.cur - 1);
+    else if (k === 'Home') toPage(1);
+    else if (k === 'End') toPage(v.n);
+    else if (k === '+' || k === '=') vZoom(v.zi + 1);
+    else if (k === '-' || k === '_') vZoom(v.zi - 1);
+    else if (k === '0') vZoom(3);
+    else { if (k === 'ArrowUp' || k === 'ArrowDown' || k === ' ') v.moved = true; return; }
+    e.preventDefault();
+    e.stopPropagation();
+  });
+  box.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    const p = pagePoint(e), bl = p && v.hasText ? blockAt(p.pg, p.nx, p.ny) : null;
+    showMenu(e.clientX, e.clientY, [
+      bl && { label: '在全文中查看這段', icon: 'page', act: () => gotoText(bl.a, bl.b) },
+      bl && { label: '拷貝這段文字', icon: 'copy', act: () => copyText(S.pv.text.slice(bl.a, bl.b).trim()) },
+      bl && { sep: true },
+      { label: '放大', key: '+', act: () => vZoom(v.zi + 1) },
+      { label: '縮小', key: '−', act: () => vZoom(v.zi - 1) },
+      { label: '適合寬度', key: '0', act: () => vZoom(3) },
+      { sep: true },
+      { label: '用系統 PDF 閱讀器顯示', icon: 'page', act: () => showSystemPdf() },
+      { label: '用默認程序打開', icon: 'open', act: () => doOpen(S.pv.id) },
+    ]);
+  });
+}
+function showSystemPdf() {
+  const pv = S.pv;
+  if (!pv) return;
+  const page = V ? V.cur : null;
+  if (isBigPdf(pv)) S.fullPdf.add(pv.id);
+  else { S.pdfMode = 'system'; api('settings', { pdf_view: 'system' }).catch(() => {}); }
+  S.origPage = page;
+  renderPreviewBody();
+}
+function showPagedPdf() {
+  const pv = S.pv;
+  if (!pv) return;
+  S.fullPdf.delete(pv.id);
+  if (S.pdfMode !== 'pages') { S.pdfMode = 'pages'; api('settings', { pdf_view: 'pages' }).catch(() => {}); }
+  renderPreviewBody();
+}
+
+// ---- 全文與原件互跳。全文裡的位置按 UTF-16 下標計，與後台換算後的命中位置一致
+function readerOffset(node, off) {
+  const el = node && (node.nodeType === 1 ? node : node.parentNode);
+  const blk = el && el.closest && el.closest('#reader .blk[data-a]');
+  if (!blk) return null;
+  const r = document.createRange();
+  r.setStart(blk, 0);
+  try { r.setEnd(node, off); } catch (err) { return +blk.dataset.a; }
+  let n = r.toString().length;
+  const hd = blk.querySelector(':scope > .pghd');
+  if (hd && r.intersectsNode(hd)) n -= Math.min(n, hd.textContent.length);
+  return +blk.dataset.a + n;
+}
+function readerBlockAt(o) {
+  let best = null;
+  for (const b of $$('#reader .blk[data-a]')) { if (+b.dataset.a <= o) best = b; else break; }
+  return best;
+}
+function textNodeAt(blk, o) {
+  const w = document.createTreeWalker(blk, NodeFilter.SHOW_TEXT,
+    { acceptNode: n => (n.parentNode.closest('.pghd') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT) });
+  let acc = +blk.dataset.a, last = null;
+  for (let n = w.nextNode(); n; n = w.nextNode()) {
+    if (o <= acc + n.data.length) return [n, o - acc];
+    acc += n.data.length;
+    last = n;
+  }
+  return last ? [last, last.data.length] : null;
+}
+function selectReaderRange(s, e) {
+  const b1 = readerBlockAt(s), b2 = readerBlockAt(e) || b1;
+  if (!b1) return;
+  b1.scrollIntoView({ block: 'center' });          // 先讓這塊排版（content-visibility），再取位置
+  requestAnimationFrame(() => {
+    const p = textNodeAt(b1, s), q = textNodeAt(b2, e);
+    if (!p || !q) return;
+    const r = document.createRange();
+    r.setStart(p[0], p[1]);
+    r.setEnd(q[0], q[1]);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(r);
+    const rd = $('#reader'), rr = r.getBoundingClientRect(), br = rd.getBoundingClientRect();
+    rd.scrollTop += rr.top - br.top - rd.clientHeight / 3;
+  });
+}
+function gotoText(s, e) {
+  S.pendingSel = [s, e];
+  S.pvTab = S.pvTabPref = 'text';
+  renderPreviewBody();
+}
+function locateInOrig(s, e) {
+  const pv = S.pv;
+  if (!pv || pv.kind !== 'pdf' || s == null) return;
+  S.pdfFocus = { id: pv.id, s, e: e == null ? s : e };
+  S.origPage = pageOfOffset(pv, s);
+  S.pvTab = S.pvTabPref = 'orig';
+  renderPreviewBody();
+}
+function readerTopOffset() {
+  const rd = $('#reader');
+  if (!rd) return null;
+  const top = rd.getBoundingClientRect().top + 4;
+  for (const b of $$('#reader .blk[data-a]')) if (b.getBoundingClientRect().bottom > top) return +b.dataset.a;
+  return null;
 }
 function renderInfo(body) {
   const pv = S.pv;
@@ -1413,7 +1828,8 @@ function fillMark(m, str, qset, base, diffs) {
   flush();
 }
 function findActive() { return S.find.open && !!S.find.q.trim(); }
-const findKey = () => [S.find.q.trim(), S.mode, S.fuzzy ? S.fzSim : ''].join('\u0001');
+const findKey = () => [S.find.q.trim(), S.mode, S.find.fz ? S.find.sim : ''].join('\u0001');
+const findFzQS = () => (S.find.fz ? `&fuzzy=1&sim=${S.find.sim}` : '');
 function findReady() { const r = S.find.res; return !!(r && S.pv && r.id === S.pv.id && r.key === findKey()); }
 function renderReader(body) {
   const pv = S.pv;
@@ -1423,7 +1839,10 @@ function renderReader(body) {
   }
   body.innerHTML = `<div class="findbar" id="findbar"${S.find.open ? '' : ' hidden'}>${I.search}
     <input id="find-q" type="text" spellcheck="false" autocomplete="off" placeholder="在本文件內查找 —— 簡繁異體互通" value="${esc(S.find.q)}">
-    <span class="find-mode" id="find-mode"></span>
+    <button class="find-fz${S.find.fz ? ' on' : ''}" data-act="find-fz" title="模糊查找：容許脫字、衍字、訛字（只管本文件內查找，與上方檢索框的「模糊」互不影響）">≈ 模糊</button>
+    <select id="find-sim" title="相似度下限"${S.find.fz ? '' : ' hidden'}>${['0.9', '0.8', '0.7', '0.6', '0.5'].map(v =>
+      `<option value="${v}"${v === S.find.sim ? ' selected' : ''}>≥ ${Math.round(v * 100)}%</option>`).join('')}</select>
+    <span class="find-mode" id="find-mode" title="匹配方式跟隨上方的精確／簡繁／異體"></span>
     <button class="icon-btn" data-act="find-close" title="關閉查找（esc）">${I.x}</button></div>
     <div class="hitbar" id="hitbar"></div><div class="reader" id="reader" style="--reader-size:${S.readerSize}px"></div>`;
   bindFind();
@@ -1488,6 +1907,7 @@ function paintReader() {
     flushRun();
     const div = document.createElement('div');
     div.className = 'blk';
+    div.dataset.a = a;
     if (page) {
       div.dataset.page = page;
       const hd = document.createElement('div');
@@ -1523,6 +1943,14 @@ function paintReader() {
     S.pendingPos = null;
   }
   renderHitbar();
+  if (S.pendingSel) {
+    const [s, e] = S.pendingSel;
+    S.pendingSel = null;
+    const k = spans.findIndex(sp => sp[1] > s);
+    if (k >= 0) S.hit = k;
+    renderHitbar();
+    return requestAnimationFrame(() => selectReaderRange(s, e));
+  }
   if (spans.length) requestAnimationFrame(() => gotoHit(start));
 }
 // ---- 本文件內查找（⌘F）：與主檢索框無關，用同樣的匹配方式和模糊設置
@@ -1530,7 +1958,12 @@ let findTimer = null, findSeq = 0;
 function bindFind() {
   const inp = $('#find-q');
   if (!inp) return;
-  $('#find-mode').textContent = MODE_LABEL[S.mode] + (S.fuzzy ? ` · 模糊 ≥ ${Math.round(S.fzSim * 100)}%` : '');
+  $('#find-mode').textContent = MODE_LABEL[S.mode];
+  $('#find-sim').addEventListener('change', e => {
+    S.find.sim = e.target.value;
+    api('settings', { find_sim: S.find.sim }).catch(() => {});
+    if (findActive()) runFind();
+  });
   let comp = false;
   inp.addEventListener('compositionstart', () => { comp = true; });
   inp.addEventListener('compositionend', () => { comp = false; onFindInput(); });
@@ -1555,7 +1988,7 @@ async function runFind() {
   S.find.busy = true;
   renderHitbar();
   try {
-    const r = await api(`find?id=${pv.id}&q=${encodeURIComponent(S.find.q)}&mode=${S.mode}${fzQS()}`);
+    const r = await api(`find?id=${pv.id}&q=${encodeURIComponent(S.find.q)}&mode=${S.mode}${findFzQS()}`);
     if (seq !== findSeq || !S.pv || S.pv.id !== pv.id) return;
     S.find.res = { id: pv.id, key, spans: r.spans, diffs: r.diffs, qchars: r.qchars };
     S.find.busy = false;
@@ -1607,7 +2040,7 @@ function renderHitbar() {
     `<span style="color:var(--text-3)">${msg}</span>`}
     <span class="grow"></span>
     <button class="icon-btn${S.find.open ? ' on' : ''}" data-act="find" title="在本文件內查找（⌘F）">${I.search}</button>
-    ${pv.kind === 'pdf' && pv.exists ? `<button class="icon-btn" data-act="orig-page" title="在原件中查看${page ? '此頁' : ''}">${I.page}</button>` : ''}
+    ${pv.kind === 'pdf' && pv.exists ? `<button class="icon-btn" data-act="orig-page" title="${n ? '在原件中查看這處命中' : '在原件中查看這一頁'}（⌥ 單擊全文中的任一處也可）">${I.page}</button>` : ''}
     <span class="vsep"></span>
     <button class="icon-btn" data-act="font-down" title="縮小字號" style="font-size:12px;font-weight:600">A</button>
     <button class="icon-btn" data-act="font-up" title="放大字號" style="font-size:16px;font-weight:600">A</button>`;
@@ -1703,18 +2136,30 @@ $('#preview').addEventListener('click', async e => {
     case 'prev-hit': return gotoHit(S.hit - 1);
     case 'next-hit': return gotoHit(S.hit + 1);
     case 'find': return S.find.open ? closeFind() : openFind();
-    case 'pg-prev': return S.pg && showPage(S.pg.page - 1);
-    case 'pg-next': return S.pg && showPage(S.pg.page + 1);
-    case 'pg-fit': {
-      S.pgFit = b.dataset.fit;
-      const v = $('#pgview');
-      if (v) v.className = 'pgview fit-' + S.pgFit;
-      $$('[data-act="pg-fit"]').forEach(x => x.classList.toggle('on', x.dataset.fit === S.pgFit));
-      return;
+    case 'pg-prev': return V && toPage(V.cur - 1);
+    case 'pg-next': return V && toPage(V.cur + 1);
+    case 'pg-zin': return V && vZoom(V.zi + 1);
+    case 'pg-zout': return V && vZoom(V.zi - 1);
+    case 'pg-full': return showSystemPdf();
+    case 'pg-pages': return showPagedPdf();
+    case 'find-fz': {
+      S.find.fz = !S.find.fz;
+      b.classList.toggle('on', S.find.fz);
+      const sl = $('#find-sim');
+      if (sl) sl.hidden = !S.find.fz;
+      api('settings', { find_fuzzy: S.find.fz ? '1' : '0' }).catch(() => {});
+      if (findActive()) runFind();
+      return $('#find-q') && $('#find-q').focus();
     }
-    case 'pg-full': S.fullPdf.add(id); S.origPage = S.pg ? S.pg.page : null; return renderPreviewBody();
     case 'find-close': return closeFind();
-    case 'orig-page': S.origPage = curPage(); S.pvTab = S.pvTabPref = 'orig'; return renderPreviewBody();
+    case 'orig-page': {
+      const sp = S.hitEls.length && S.spans ? S.spans[S.hit] : null;
+      if (sp) return locateInOrig(sp[0], sp[1]);
+      const o = readerTopOffset();
+      S.origPage = o != null ? pageOfOffset(S.pv, o) : null;
+      S.pvTab = S.pvTabPref = 'orig';
+      return renderPreviewBody();
+    }
     case 'font-up': case 'font-down': {
       S.readerSize = Math.max(12, Math.min(28, S.readerSize + (b.dataset.act === 'font-up' ? 1 : -1)));
       api('settings', { reader_size: S.readerSize }).catch(() => {});
@@ -1787,7 +2232,7 @@ function setMode(m) {
   S.mode = m;
   $$('#mode button').forEach(b => b.classList.toggle('on', b.dataset.mode === m));
   const fm = $('#find-mode');
-  if (fm) fm.textContent = MODE_LABEL[S.mode] + (S.fuzzy ? ` · 模糊 ≥ ${Math.round(S.fzSim * 100)}%` : '');
+  if (fm) fm.textContent = MODE_LABEL[S.mode];
   if (findActive()) runFind();
   api('settings', { mode: m }).catch(() => {});
   runSearch({ keepScroll: true });
@@ -1800,8 +2245,6 @@ function renderFuzzy() {
   $('#fz').classList.toggle('on', S.fuzzy);
   $('#fz-btn').setAttribute('aria-pressed', S.fuzzy ? 'true' : 'false');
   $('#fz-sim').value = S.fzSim;
-  const fm = $('#find-mode');
-  if (fm) fm.textContent = MODE_LABEL[S.mode] + (S.fuzzy ? ` · 模糊 ≥ ${Math.round(S.fzSim * 100)}%` : '');
 }
 function setFuzzy(on, sim) {
   S.fuzzy = !!on;
@@ -1810,7 +2253,6 @@ function setFuzzy(on, sim) {
   api('settings', { fuzzy: S.fuzzy ? '1' : '0', fuzzy_sim: S.fzSim }).catch(() => {});
   S.limit = 200;
   runSearch({ keepScroll: true });
-  if (findActive()) runFind();
 }
 $('#fz-btn').onclick = () => setFuzzy(!S.fuzzy);
 $('#fz-sim').onchange = e => setFuzzy(true, e.target.value);
@@ -1830,7 +2272,11 @@ function showHelp() {
     <div class="field"><label>限定檢索範圍</label>
       <p class="hint" style="margin:0">點側欄的文件夾 —— 只在該文件夾內檢索；⌘ 點擊可同時選幾個文件夾<br>
       在結果上右鍵 →「只在選中項中檢索」／「加入檢索範圍」—— 自選若干文件和文件夾；點結果上方的「範圍」標籤可查看、移除<br>
-      預覽全文時按 ⌘F —— 只在當前文件內查找（與上方檢索框互不干擾）</p></div>
+      預覽全文時按 ⌘F —— 只在當前文件內查找（與上方檢索框互不干擾，模糊開關也各自獨立）</p></div>
+    <div class="field"><label>PDF 原件</label>
+      <p class="hint" style="margin:0">「原件」逐頁顯示，黃底標出命中；鼠標停在文字上會框出那一段，單擊跳到「全文」並選中它。<br>
+      反過來，在「全文」裡右鍵 →「在原件中查看此處」（或 ⌥ 單擊），原件上用紅框標出。需要選字時點「系統閱讀器」。<br>
+      掃描件沒有文字層，無法標註。</p></div>
     <div class="field"><label>三種匹配方式</label>
       <p class="hint" style="margin:0">精確 —— 只匹配輸入的字形（不分大小寫、全半角）<br>
       簡繁 —— 簡體與繁體互通，如 后/後、历/歷/曆<br>
@@ -1850,7 +2296,7 @@ async function resetSettings() {
   const exChanged = def.excludes !== undefined && (st.excludes || '') !== def.excludes;
   const r = await dialog({
     title: '恢復默認設置？',
-    desc: '匹配方式（異體）、模糊檢索（關）、檢索範圍（僅文件名）、排序、名稱排序規則（跟隨系統）、跨標點匹配（關）、實時監聽（開）、' +
+    desc: '匹配方式（異體）、模糊檢索（關）、本文件內查找的模糊（關）、PDF 原件逐頁顯示、檢索範圍（僅文件名）、排序、名稱排序規則（跟隨系統）、跨標點匹配（關）、實時監聽（開）、' +
       '跳過代碼項目（開）、代碼與配置文件只收文件名，以及欄寬和閱讀字號，都恢復為默認。<br>' +
       '<b>資料庫、收藏、標籤、備註和索引都不受影響。</b>',
     body: (groups ? `<div class="field"><label class="switch"><input type="checkbox" id="rs-var">同時清空自定義異體字（${groups} 組）</label></div>` : '') +
@@ -1868,6 +2314,10 @@ async function resetSettings() {
     S.sort = s2.settings.sort || 'relevance';
     S.fuzzy = s2.settings.fuzzy === '1';
     S.fzSim = s2.settings.fuzzy_sim || '0.7';
+    S.find.fz = s2.settings.find_fuzzy === '1';
+    S.find.sim = s2.settings.find_sim || '0.7';
+    S.pdfMode = s2.settings.pdf_view === 'system' ? 'system' : 'pages';
+    S.pdfZoom = null;
     renderFuzzy();
     S.folderView = undefined;
     S.readerSize = 16;
@@ -1966,9 +2416,9 @@ document.addEventListener('keydown', e => {
   if (mod && e.key.toLowerCase() === 'g') { e.preventDefault(); return gotoHit(S.hit + (e.shiftKey ? -1 : 1)); }
   if (inQ) return;
   if (e.key === '/' ) { e.preventDefault(); qEl.focus(); qEl.select(); return; }
-  if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && S.pg && S.pvTab === 'orig' && $('#pg-img')) {
+  if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && V && S.pvTab === 'orig' && $('#pdfv')) {
     e.preventDefault();
-    return showPage(S.pg.page + (e.key === 'ArrowRight' ? 1 : -1));
+    return toPage(V.cur + (e.key === 'ArrowRight' ? 1 : -1));
   }
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); return moveCursor(e.key === 'ArrowDown' ? 1 : -1, e.shiftKey); }
   if (!S.cur && !S.pv) return;
@@ -2052,6 +2502,84 @@ async function poll() {
 
 function renderAll() { renderSidebar(); renderResults(); renderPreview(); }
 
+// ===================================================================== 右鍵
+// 結果、側欄、文件夾樹、原件頁面有各自的菜單（在各自的監聽器裡處理）。選中的文字、輸入框用系統菜單：
+// 外殼會去掉「重新載入」「檢查元件」之類的無關項，並在全文裡加上通檢自己的命令。其餘地方（按鈕、工具欄、空白處）不彈菜單。
+function selectionUnder(sel, x, y) {
+  if (!sel || !sel.rangeCount) return false;
+  return Array.from(sel.getRangeAt(0).getClientRects()).some(r => x >= r.left - 2 && x <= r.right + 2 && y >= r.top - 2 && y <= r.bottom + 2);
+}
+function nativeMenu(info) {
+  try { window.webkit.messageHandlers.tj.postMessage(Object.assign({ cmd: 'menu' }, info)); } catch (err) { /* 瀏覽器模式 */ }
+}
+document.addEventListener('contextmenu', e => {
+  if (e.defaultPrevented) return;
+  const t = e.target;
+  if (t.closest && t.closest('input, textarea, select, [contenteditable="true"]')) return nativeMenu({ kind: 'edit' });
+  const sel = window.getSelection();
+  const selText = sel && !sel.isCollapsed ? sel.toString().trim() : '';
+  const rd = t.closest && t.closest('#reader');
+  if (rd && S.pv && !S.pv.folder) {
+    const inSel = !!selText && sel.anchorNode && rd.contains(sel.anchorNode) && selectionUnder(sel, e.clientX, e.clientY);
+    let s = null, en = null;
+    if (inSel) {
+      const r = sel.getRangeAt(0);
+      s = readerOffset(r.startContainer, r.startOffset);
+      en = readerOffset(r.endContainer, r.endOffset);
+    } else {
+      const cr = document.caretRangeFromPoint && document.caretRangeFromPoint(e.clientX, e.clientY);
+      if (cr) s = en = readerOffset(cr.startContainer, cr.startOffset);
+    }
+    S.ctx = { kind: 'reader', id: S.pv.id, sel: inSel ? selText : '', s, e: en };
+    const pdf = S.pv.kind === 'pdf' && S.pv.status === 1 && s != null;
+    if (!S.native) { e.preventDefault(); return readerMenu(e.clientX, e.clientY, pdf); }
+    return nativeMenu({ kind: 'reader', sel: S.ctx.sel.slice(0, 80), pdf });
+  }
+  if (selText && selectionUnder(sel, e.clientX, e.clientY)) {
+    S.ctx = { kind: 'text', sel: selText };
+    return nativeMenu({ kind: 'text', sel: selText.slice(0, 80) });
+  }
+  e.preventDefault();
+});
+function citeText(c) {
+  const pv = S.pv, name = (pv.name || '').replace(/\.[^.]+$/, '');
+  const page = pv.text && pv.text.indexOf('\f') >= 0 && c.s != null ? pageOfOffset(pv, c.s) : 0;
+  return `${c.sel}（《${name}》${page ? `，PDF 第 ${page} 頁` : ''}）`;
+}
+function ctxAction(action) {
+  const c = S.ctx;
+  if (!c) return;
+  if (action === 'search' && c.sel) { qEl.value = c.sel; onQuery(); runSearch(); }
+  else if (action === 'find' && c.sel) { S.find.q = c.sel; openFind(); const inp = $('#find-q'); if (inp) inp.value = c.sel; runFind(); }
+  else if (action === 'cite' && c.sel) copyText(citeText(c));
+  else if (action === 'copy' && c.sel) copyText(c.sel);
+  else if (action === 'orig' && c.kind === 'reader') locateInOrig(c.s, c.e);
+}
+// 瀏覽器模式（沒有原生外殼）下全文裡的菜單
+function readerMenu(x, y, pdf) {
+  const c = S.ctx, short = c.sel.length > 12 ? c.sel.slice(0, 12) + '…' : c.sel;
+  const items = [
+    c.sel && { label: '拷貝', icon: 'copy', act: () => ctxAction('copy') },
+    c.sel && { label: '拷貝（附出處）', icon: 'copy', act: () => ctxAction('cite') },
+    c.sel && { sep: true },
+    c.sel && { label: `在通檢中檢索「${short}」`, icon: 'search', act: () => ctxAction('search') },
+    c.sel && { label: `在本文件內查找「${short}」`, icon: 'search', act: () => ctxAction('find') },
+    pdf && { label: '在原件中查看此處', icon: 'page', act: () => ctxAction('orig') },
+  ].filter(Boolean);
+  showMenu(x, y, items.length ? items : [{ label: '沒有可用的操作', disabled: true }]);
+}
+// ⌥ 單擊全文：在原件中查看此處
+document.addEventListener('click', e => {
+  if (!e.altKey || !S.pv || S.pv.kind !== 'pdf' || S.pv.status !== 1) return;
+  const rd = e.target.closest && e.target.closest('#reader');
+  if (!rd) return;
+  const cr = document.caretRangeFromPoint && document.caretRangeFromPoint(e.clientX, e.clientY);
+  const o = cr ? readerOffset(cr.startContainer, cr.startOffset) : null;
+  if (o == null) return;
+  e.preventDefault();
+  locateInOrig(o, o);
+});
+
 async function init() {
   try {
     const st = await api('state');
@@ -2065,6 +2593,9 @@ async function init() {
     S.fuzzy = st.settings.fuzzy === '1';
     S.fzSim = ['0.9', '0.8', '0.7', '0.6', '0.5'].includes(st.settings.fuzzy_sim) ? st.settings.fuzzy_sim : '0.7';
     S.readerSize = Math.max(12, Math.min(28, +st.settings.reader_size || 16));
+    S.find.fz = st.settings.find_fuzzy === '1';
+    S.find.sim = ['0.9', '0.8', '0.7', '0.6', '0.5'].includes(st.settings.find_sim) ? st.settings.find_sim : '0.7';
+    S.pdfMode = st.settings.pdf_view === 'system' ? 'system' : 'pages';
     if (+st.settings.sidebar_w) document.documentElement.style.setProperty('--sidebar-w', st.settings.sidebar_w + 'px');
     if (+st.settings.list_w) document.documentElement.style.setProperty('--list-w', st.settings.list_w + 'px');
   } catch (e) { fail(e); }

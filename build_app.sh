@@ -21,7 +21,7 @@ fi
 STAGE="build/.stage.app"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/Contents/MacOS" "$STAGE/Contents/Resources/bin"
-swiftc -O -o "$STAGE/Contents/MacOS/TongJian" macos/main.swift
+swiftc -O -o "$STAGE/Contents/MacOS/TongJian" macos/main.swift macos/webmenu.swift
 swiftc -O -o "$STAGE/Contents/Resources/bin/tjhelper" macos/tjhelper.swift
 rsync -a --exclude __pycache__ --exclude '*.pyc' app/ "$STAGE/Contents/Resources/app/"
 cp macos/Info.plist "$STAGE/Contents/Info.plist"
