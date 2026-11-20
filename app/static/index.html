@@ -21,7 +21,11 @@
         <button id="q-clear" class="q-clear" title="清除" hidden>
           <svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7 7 17"/></svg>
         </button>
+        <button id="q-hist" class="q-hist" title="檢索歷史與保存的檢索（在空的檢索框裡按 ↓）">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.2"/><path d="M12 7.4V12l3.1 2"/></svg>
+        </button>
         <kbd class="q-kbd">⌘K</kbd>
+        <div id="qpanel" class="qpanel" hidden></div>
       </div>
       <div class="seg" id="mode" role="radiogroup" aria-label="匹配方式">
         <button data-mode="exact" title="精確：只匹配輸入的字形（不分大小寫、全半角）">精確</button>

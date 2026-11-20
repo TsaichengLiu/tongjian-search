@@ -69,6 +69,7 @@ TOOLS = [
                      "description": "只在這些文件夾（含子文件夾）裡檢索，絕對路徑"},
          "file_ids": {"type": "array", "items": {"type": "integer"}, "description": "只在這些文件裡檢索"},
          "kind": {"type": "string", "enum": KINDS, "description": "只看某類文件；notext＝沒有文字層的 PDF"},
+         "extensions": {"type": "array", "items": {"type": "string"}, "description": "只看這些擴展名，如 [\"pdf\", \"caj\"]"},
          "tag": {"type": "string", "description": "只看帶這個標籤的文件"},
          "starred": {"type": "boolean", "description": "只看收藏的文件"},
          "sort": {"type": "string", "enum": ["relevance", "hits", "mtime", "name", "size"], "default": "relevance"},
@@ -312,6 +313,10 @@ class Service(object):
         if a.get("file_ids"):
             p["ids"] = ",".join(str(_clamp(x, 1, 1 << 62, 0)) for x in a["file_ids"])
             filt.append("只在 %d 個指定文件中" % len(a["file_ids"]))
+        if a.get("extensions"):
+            exts = [str(x).strip().lstrip(".").lower() for x in a["extensions"] if str(x).strip()]
+            p["exts"] = ",".join(exts)
+            filt.append("擴展名 " + "、".join(exts))
         if a.get("kind"):
             if a["kind"] not in KINDS:
                 raise ToolError("kind 只能是：" + "、".join(KINDS))
@@ -378,6 +383,9 @@ class Service(object):
                 meta.append("無文字層" if it["status"] == 2 else "幾乎無文字層（掃描件）")
             if it.get("tags"):
                 meta.append("標籤：" + "、".join(tags.get(t, "?") for t in it["tags"]))
+            if it.get("dups"):
+                meta.append("另有 %d 個內容相同的副本：%s" % (len(it["dups"]), "；".join(
+                    "[id %d] %s" % (d["id"], os.path.join(d["dir"], d["name"])) for d in it["dups"][:5])))
             lines.append("   " + " · ".join(x for x in meta if x))
             for sn in it.get("snippets") or []:
                 lines.append("   " + ("p.%d " % sn["page"] if sn.get("page") else "") + mark_segs(sn["segs"]))

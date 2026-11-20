@@ -245,6 +245,27 @@ class Handler(BaseHTTPRequestHandler):
     def api_preview(self, p, b):
         return App.lib.preview(int(p["id"]), p.get("q", ""), p.get("mode", "full"), fz=fuzzy_param(p))
 
+    def api_searches(self, p, b):
+        return App.lib.searches()
+
+    def api_searches_add(self, p, b):
+        App.lib.add_search(b.get("kind"), b.get("q"), b.get("params"), b.get("name") or "")
+        return App.lib.searches()
+
+    def api_searches_update(self, p, b):
+        App.lib.update_search(int(b["id"]), b.get("name"), b.get("q"), b.get("params"))
+        return App.lib.searches()
+
+    def api_searches_remove(self, p, b):
+        App.lib.remove_search(int(b["id"]) if b.get("id") is not None else None, bool(b.get("clear")))
+        return App.lib.searches()
+
+    def api_duplicates(self, p, b):
+        return App.lib.duplicates(p)
+
+    def api_dups_verify(self, p, b):
+        return App.lib.dups_verify(_int_list(b.get("ids") or []))
+
     def api_pageboxes(self, p, b):
         return App.lib.page_boxes(int(p["id"]), int(p.get("p") or 1))
 
@@ -386,7 +407,7 @@ class Handler(BaseHTTPRequestHandler):
 
 SETTING_KEYS = ("custom_variants", "excludes", "cross_punct", "rescan_minutes", "watch", "skip_projects",
                 "code_fulltext", "mode", "scope", "sidebar_w", "list_w", "sort", "collation", "folder_view",
-                "fuzzy", "fuzzy_sim", "reader_size", "find_fuzzy", "find_sim", "pdf_view")
+                "fuzzy", "fuzzy_sim", "reader_size", "find_fuzzy", "find_sim", "pdf_view", "history_on", "merge_dups")
 
 
 class Server(ThreadingHTTPServer):

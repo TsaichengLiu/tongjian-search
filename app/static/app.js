@@ -49,7 +49,9 @@ const S = {
   roots: [], tags: [], stats: {}, status: {}, settings: {}, meta: {}, tools: {},
   q: '', mode: 'full', scope: 'name', sort: 'relevance', limit: 200, projects: [],
   fuzzy: false, fzSim: '0.7', find: { open: false, q: '', res: null, busy: false, fz: false, sim: '0.7' },
-  filter: { root: null, dir: null, kind: null, tag: null, starred: false, only: null },
+  filter: { root: null, dir: null, kind: null, tag: null, starred: false, only: null, exts: [] },
+  openDups: new Set(), searches: { history: [], saved: [] }, dupView: false, dupData: null, dupKeep: {}, dupCount: null,
+  extAll: false,
   res: null, items: [], cur: null, sel: new Set(), anchor: null,
   pv: null, pvTab: 'text', pvTabPref: 'text', hit: 0, hitEls: [], pendingPos: null,
   dirs: {}, openRoots: new Set(), openDirs: new Set(),
@@ -311,7 +313,7 @@ function treeHtml(node, depth, rootId) {
 }
 function renderSidebar() {
   const f = S.filter, st = S.stats || {};
-  const noFilter = !f.root && !f.dir && !f.kind && !f.tag && !f.starred && !f.only;
+  const noFilter = !hasFilter() && !S.dupView;
   let h = `<div class="brand"><div class="seal">檢</div><div><div class="brand-name">通檢</div>
     <div class="brand-sub">簡繁異體 · 文件檢索</div></div></div><div class="side-scroll">`;
   h += `<div class="side-sec"><div class="side-h"><span>資料庫</span>
@@ -327,17 +329,28 @@ function renderSidebar() {
   h += `</div><div class="side-sec"><div class="side-h"><span>瀏覽</span></div>
     <div class="side-item${noFilter ? ' active' : ''}" data-act="all"><span class="side-ic">${I.tray}</span><span class="label">全部文件</span><span class="count">${fmtNum(st.files)}</span></div>
     <div class="side-item${f.starred ? ' active' : ''}" data-act="starred"><span class="side-ic">${I.star}</span><span class="label">已收藏</span><span class="count">${fmtNum(st.starred)}</span></div>
-    <div class="side-item${f.kind === 'notext' ? ' active' : ''}" data-act="kind" data-kind="notext" title="沒有文字層的 PDF（多為掃描件），只能檢索文件名"><span class="side-ic">${I.scan}</span><span class="label">無文字層</span><span class="count">${fmtNum(st.notext)}</span></div></div>`;
-  const kinds = st.kinds || {};
-  const ks = KIND_ORDER.filter(k => kinds[k]);
-  if (ks.length) {
-    h += `<div class="side-sec"><div class="side-h"><span>類型</span></div>`;
-    for (const k of ks) {
-      h += `<div class="side-item${f.kind === k ? ' active' : ''}" data-act="kind" data-kind="${k}">
-        <span class="side-ic"><span class="tag-dot" style="background:${KIND_COLOR[k]};border-radius:3px"></span></span>
-        <span class="label">${KIND_LABEL[k]}</span><span class="count">${fmtNum(kinds[k])}</span></div>`;
+    <div class="side-item${f.kind === 'notext' ? ' active' : ''}" data-act="kind" data-kind="notext" title="沒有文字層的 PDF（多為掃描件），只能檢索文件名"><span class="side-ic">${I.scan}</span><span class="label">無文字層</span><span class="count">${fmtNum(st.notext)}</span></div>
+    <div class="side-item${S.dupView ? ' active' : ''}" data-act="dups" title="內容相同的文件：選留一份，其餘移到廢紙簍（會按側欄的類型、文件夾篩選縮小範圍）"><span class="side-ic">${I.copy}</span><span class="label">重複文件</span><span class="count">${S.dupCount != null ? fmtNum(S.dupCount) : ''}</span></div></div>`;
+  if (S.searches.saved.length) {
+    h += `<div class="side-sec"><div class="side-h"><span>已保存的檢索</span></div>`;
+    for (const e of S.searches.saved) {
+      h += `<div class="side-item${!S.dupView && isCurrentSearch(e) ? ' active' : ''}" data-act="saved" data-id="${e.id}" title="${esc((e.q ? '「' + e.q + '」 ' : '') + searchSummary(e).join(' · '))}">
+        <span class="side-ic saved-ic">${I.starFill}</span><span class="label">${esc(e.name)}</span></div>`;
     }
     h += '</div>';
+  }
+  const exts = st.exts || [], selx = new Set(f.exts || []);
+  if (exts.length) {
+    const shown = S.extAll ? exts : exts.slice(0, 12);
+    const chip = (x, k, n, on) => `<button class="ext-chip${on ? ' on' : ''}" data-act="ext" data-ext="${esc(x)}" title="${x ? '.' + esc(x) : '沒有擴展名'}：${fmtNum(n)} 個文件（可多選）">
+      <span class="badge k-${k}">${esc(x ? (x.length > 7 ? x.slice(0, 6) + '…' : x) : '—')}</span><span class="n">${fmtNum(n)}</span></button>`;
+    h += `<div class="side-sec"><div class="side-h"><span>類型</span>
+      ${selx.size ? `<button class="side-link" data-act="ext-clear">清除</button>` : ''}
+      <button class="icon-btn" data-act="ext-add" title="輸入擴展名篩選（可多個，如 caj nh）">${I.plus}</button></div><div class="ext-grid">`;
+    for (const [x, k, n] of shown) h += chip(x, k, n, selx.has(x));
+    for (const x of selx) if (!shown.some(e => e[0] === x)) { const e = exts.find(e => e[0] === x); h += chip(x, e ? e[1] : 'other', e ? e[2] : 0, true); }
+    if (exts.length > 12) h += `<button class="ext-more" data-act="ext-more">${S.extAll ? '收起' : `全部 ${exts.length} 種`}</button>`;
+    h += '</div></div>';
   }
   h += `<div class="side-sec"><div class="side-h"><span>標籤</span>
     <button class="icon-btn" data-act="new-tag" title="新建標籤">${I.plus}</button></div>`;
@@ -407,7 +420,21 @@ $('#sidebar').addEventListener('click', async e => {
   if (act === 'new-tag') return newTag();
   if (act === 'settings') return openSettings();
   if (act === 'rescan') { S.lastRescan = Date.now(); await api('rescan', {}); toast('正在重新掃描…'); return setTimeout(poll, 300); }
-  if (act === 'all') return setFilter({ root: null, dir: null, kind: null, tag: null, starred: false, only: null });
+  if (act === 'all') { S.dupView = false; return setFilter({ root: null, dir: null, kind: null, tag: null, starred: false, only: null, exts: [] }); }
+  if (act === 'dups') return S.dupView ? (S.dupView = false, renderSidebar(), runSearch()) : openDupView();
+  if (act === 'saved') { const en = S.searches.saved.find(x => x.id === +el.dataset.id); return en && applySearch(en); }
+  if (act === 'ext') {
+    const x = el.dataset.ext, cur = S.filter.exts || [];
+    return setFilter({ exts: cur.includes(x) ? cur.filter(y => y !== x) : cur.concat([x]) });
+  }
+  if (act === 'ext-more') { S.extAll = !S.extAll; return renderSidebar(); }
+  if (act === 'ext-clear') return setFilter({ exts: [] });
+  if (act === 'ext-add') {
+    const v = await promptDialog('按擴展名篩選', '輸入一個或幾個擴展名，用空格或逗號隔開，如：caj nh pdf。可與側欄裡點選的一起用。', '');
+    if (!v) return;
+    const add = v.split(/[\s,，、;；]+/).map(x => x.trim().replace(/^\.+/, '').toLowerCase()).filter(Boolean);
+    return setFilter({ exts: Array.from(new Set((S.filter.exts || []).concat(add))) });
+  }
   if (act === 'root') {
     if (e.metaKey || e.ctrlKey) { const r = rootOf(+el.dataset.id); return r && scopeToggleDir(r.path); }
     return setFilter({ root: +el.dataset.id, dir: null });
@@ -448,6 +475,10 @@ $('#sidebar').addEventListener('contextmenu', e => {
       { sep: true },
       { label: '排除此文件夾…', icon: 'ban', danger: true, act: () => excludeFolder(p, cnt) },
     ]);
+  } else if (act === 'saved') {
+    e.preventDefault();
+    const en = S.searches.saved.find(x => x.id === +el.dataset.id);
+    if (en) savedMenu(e.clientX, e.clientY, en);
   } else if (act === 'tag') {
     e.preventDefault();
     const t = S.tags.find(t => t.id === +el.dataset.id);
@@ -520,11 +551,7 @@ async function newTag(ids) {
 // ===================================================================== 檢索
 let searchTimer = null, searchSeq = 0;
 function scheduleSearch(ms = 230) { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, ms); }
-async function runSearch(opt = {}) {
-  clearTimeout(searchTimer);
-  const seq = ++searchSeq;
-  const p = new URLSearchParams({ q: S.q, mode: S.mode, scope: S.scope, sort: S.sort, limit: S.limit, gen: seq });
-  if (S.fuzzy) { p.set('fuzzy', 1); p.set('sim', S.fzSim); }
+function filterParams(p) {
   const f = S.filter;
   if (f.only) {
     if (f.only.files.length) p.set('ids', f.only.files.map(x => x.id).join(','));
@@ -533,8 +560,27 @@ async function runSearch(opt = {}) {
   if (f.root) p.set('root', f.root);
   if (f.dir) p.set('dir', f.dir);
   if (f.kind) p.set('kind', f.kind);
+  if (f.exts && f.exts.length) p.set('exts', f.exts.map(x => x || '-').join(','));
   if (f.tag) p.set('tag', f.tag);
   if (f.starred) p.set('starred', 1);
+  return p;
+}
+// 結果列表：合併的副本展開時，副本作為普通條目跟在後面（可選中、預覽、右鍵）
+function buildItems() {
+  const out = [];
+  for (const it of (S.res && S.res.items) || []) {
+    out.push(it);
+    if (it.dups && S.openDups.has(it.id)) for (const d of it.dups) { d.dupOf = it.id; out.push(d); }
+  }
+  S.items = out;
+}
+async function runSearch(opt = {}) {
+  clearTimeout(searchTimer);
+  if (S.dupView) return loadDups();
+  const seq = ++searchSeq;
+  const p = new URLSearchParams({ q: S.q, mode: S.mode, scope: S.scope, sort: S.sort, limit: S.limit, gen: seq });
+  if (S.fuzzy) { p.set('fuzzy', 1); p.set('sim', S.fzSim); }
+  filterParams(p);
   S.loading = true;
   const slow = setTimeout(() => { if (seq === searchSeq) renderResHead(); }, 250);
   let r;
@@ -544,7 +590,8 @@ async function runSearch(opt = {}) {
   S.loading = false;
   const qChanged = !S.res || S.res.q !== r.q || S.res.mode !== r.mode || S.res.fuzzy !== r.fuzzy;
   S.res = r;
-  S.items = r.items;
+  buildItems();
+  if (r.q) noteSearch(); else clearTimeout(histTimer);
   if (!S.items.some(i => i.id === S.cur)) {
     S.cur = S.items.length ? S.items[0].id : null;
     S.sel = new Set(S.cur ? [S.cur] : []);
@@ -578,9 +625,13 @@ function renderResHead() {
   const r = S.res, f = S.filter;
   let h = '';
   if (S.loading) h += '<span class="spin"></span>';
-  if (r) {
+  if (S.dupView) {
+    const d = S.dupData;
+    if (d) h += `<span><b>${fmtNum(d.count)}</b> 組內容相同的文件${d.wasted ? ` · 刪去多餘的可騰出 <b>${fmtSize(d.wasted)}</b>` : ''}</span>`;
+  } else if (r) {
     if (r.q) {
       h += `<span><b>${fmtNum(r.items.length)}</b> 個文件`;
+      if (r.merged) h += `<span class="dup-note" title="內容相同的文件已合併成一條，點「另有 N 個副本」展開">（另合併 ${fmtNum(r.merged)} 個副本）</span>`;
       if (r.hits) h += ` · 命中 <b>${fmtNum(r.hits)}</b> 處`;
       h += ` · ${r.took < 0.01 ? '<0.01' : r.took.toFixed(2)} 秒</span>`;
       if (r.fuzzy) {
@@ -590,25 +641,39 @@ function renderResHead() {
         h += `<span class="fz-note" title="${esc(tip)}">≈ ${ft.length ? '模糊 ≥ ' + Math.round(r.fuzzy * 100) + '%' : '詞太短，未模糊'}</span>`;
       }
     } else {
-      h += `<span><b>${fmtNum(r.total)}</b> 個文件</span>`;
+      h += `<span><b>${fmtNum(r.total)}</b> 個文件${r.merged ? `<span class="dup-note">（本頁合併 ${fmtNum(r.merged)} 個副本）</span>` : ''}</span>`;
     }
   }
   const chips = [];
   if (f.root && !f.dir) { const ro = rootOf(f.root); chips.push(['root', ro ? ro.name : '資料庫']); }
   if (f.dir) chips.push(['dir', f.dir.split('/').pop()]);
+  if (S.dupView) chips.push(['dups', '查重']);
   if (f.kind) chips.push(['kind', f.kind === 'notext' ? '無文字層' : KIND_LABEL[f.kind]]);
+  if (f.exts && f.exts.length) chips.push(['exts', f.exts.map(x => x ? x.toUpperCase() : '無擴展名').join(' · ')]);
   if (f.tag) { const t = S.tags.find(t => t.id === f.tag); chips.push(['tag', '#' + (t ? t.name : '')]); }
   if (f.starred) chips.push(['starred', '已收藏']);
   if (f.only) chips.push(['only', '範圍：' + onlyLabel(f.only)]);
-  h += chips.map(([k, l]) => `<span class="fchip"${k === 'only' ? ' data-only title="只在這些文件／文件夾中檢索（點擊查看）"' : ''}><span>${esc(l)}</span><button data-clear="${k}" title="取消篩選">${I.x}</button></span>`).join('');
+  h += chips.map(([k, l]) => `<span class="fchip"${k === 'only' ? ' data-only title="只在這些文件／文件夾中檢索（點擊查看）"' : ''}><span>${esc(l)}</span><button data-clear="${k}" title="${k === 'dups' ? '退出查重' : '取消篩選'}">${I.x}</button></span>`).join('');
+  if (!S.dupView && (S.q.trim() || hasFilter())) {
+    const sv = S.searches.saved.find(isCurrentSearch);
+    h += `<button class="icon-btn save-q${sv ? ' on' : ''}" data-save title="${sv ? `已保存為「${esc(sv.name)}」` : '保存這個檢索（連同匹配方式、模糊、範圍和篩選）'}">${sv ? I.starFill : I.star}</button>`;
+  }
   $('#res-head').innerHTML = h;
 }
 $('#res-head').addEventListener('click', e => {
   const b = e.target.closest('[data-clear]');
   const oc = e.target.closest('[data-only]');
   if (oc && !b) return onlyMenu(oc);
+  const sb = e.target.closest('[data-save]');
+  if (sb) {
+    const sv = S.searches.saved.find(isCurrentSearch);
+    if (sv) { const r = sb.getBoundingClientRect(); return savedMenu(r.left, r.bottom + 4, sv); }
+    return saveCurrentSearch();
+  }
   if (!b) return;
   const k = b.dataset.clear;
+  if (k === 'dups') { S.dupView = false; renderSidebar(); return runSearch(); }
+  if (k === 'exts') return setFilter({ exts: [] });
   if (k === 'root') setFilter({ root: null, dir: null });
   else if (k === 'dir') setFilter({ dir: null });
   else setFilter({ [k]: k === 'starred' ? false : null });
@@ -628,15 +693,18 @@ function itemHtml(it) {
       <span>${fmtSize(it.size)}</span><span class="sep">·</span><span>${fmtDate(it.mtime)}</span></div></div>`;
   }
   const tags = (it.tags || []).map(id => S.tags.find(t => t.id === id)).filter(Boolean);
-  let h = `<div class="item${it.id === S.cur ? ' sel' : ''}${sel && S.sel.size > 1 ? ' multi' : ''}" data-id="${it.id}">
+  const nd = it.dups ? it.dups.length : 0, dopen = nd && S.openDups.has(it.id);
+  let h = `<div class="item${it.id === S.cur ? ' sel' : ''}${sel && S.sel.size > 1 ? ' multi' : ''}${it.dupOf ? ' dup' : ''}" data-id="${it.id}">
     <div class="it-top"><span class="badge k-${it.kind}">${esc(badgeText(it))}</span>
     <div class="it-name" title="${esc(it.name)}">${it.name_segs ? segsHtml(it.name_segs) : esc(it.name)}</div>
+    ${it.dupOf ? `<span class="dup-tag" title="與上面那份內容相同">副本</span>` : ''}
+    ${nd ? `<button class="dup-chip${dopen ? ' open' : ''}" data-dups="${it.id}" title="${it.dup_kind === 't' ? '抽出的文字完全相同' : '文件逐字節相同（快速比對）'}，點擊${dopen ? '收起' : '展開'}">另有 ${nd} 個副本${I.chev}</button>` : ''}
     ${it.starred ? `<span class="it-star" title="已收藏">${I.starFill}</span>` : ''}
     ${simBadge(it)}${it.hits ? `<span class="it-hits" title="全文命中">${fmtNum(it.hits)}${it.capped ? '+' : ''}</span>` : ''}</div>
     <div class="it-meta"><span class="it-path" title="${esc(it.dir)}">${esc(relDir(it))}</span>
     ${tags.length ? `<span class="it-tags">${tags.map(t => `<span class="tag-dot" title="${esc(t.name)}" style="background:${esc(t.color)}"></span>`).join('')}</span>` : ''}
     <span>${fmtSize(it.size)}</span><span class="sep">·</span><span>${fmtDate(it.mtime)}</span></div>`;
-  if (it.snippets && it.snippets.length) {
+  if (it.snippets && it.snippets.length && !it.dupOf) {
     h += '<div class="snips">' + it.snippets.map(s =>
       `<div class="snip" data-pos="${s.pos}">${s.page ? `<span class="pg">${s.page}</span>` : ''}${segsHtml(s.segs)}</div>`).join('') + '</div>';
   }
@@ -657,6 +725,7 @@ function renderResults() {
     return;
   }
   app.classList.remove('no-roots');
+  if (S.dupView) return renderDupView(list);
   if (!S.items.length) {
     const r = S.res;
     if (r && r.q) {
@@ -664,7 +733,7 @@ function renderResults() {
         ${S.mode !== 'full' ? `<p>試試切換到「<a href="#" data-mode-to="full">異體</a>」模式</p>` : ''}
         ${!S.fuzzy ? `<p>或開啟「<a href="#" data-fuzzy-on>模糊</a>」，容許脫字、訛字</p>` : ''}
         ${S.scope !== 'all' ? '<p>或把範圍改為「名稱與全文」</p>' : ''}
-        ${Object.values(S.filter).some(Boolean) ? '<p>或取消上方的篩選條件</p>' : ''}
+        ${hasFilter() ? '<p>或取消上方的篩選條件</p>' : ''}
         ${S.status.busy ? '<p>索引尚未完成，稍後結果會更多</p>' : ''}</div>`;
     } else {
       list.innerHTML = `<div class="empty">${I.tray.replace('<svg', '<svg class="big-ic"')}<h3>這裡沒有文件</h3>
@@ -705,6 +774,24 @@ function selectItem(id, e) {
 }
 $('#res-list').addEventListener('click', e => {
   if (e.target.closest('[data-act="add-root"]')) return addRoot();
+  const dc = e.target.closest('[data-dups]');
+  if (dc) {                                        // 展開／收起合併的副本
+    const id = +dc.dataset.dups;
+    if (S.openDups.has(id)) {
+      S.openDups.delete(id);
+      const rep = S.items.find(i => i.id === id);
+      if (rep && rep.dups && rep.dups.some(d => d.id === S.cur || S.sel.has(d.id))) { S.cur = id; S.sel = new Set([id]); loadPreview(id); }
+    } else S.openDups.add(id);
+    buildItems();
+    return renderResults();
+  }
+  if (S.dupView) {
+    const kp = e.target.closest('[data-keep]');
+    if (kp) { S.dupKeep[+kp.dataset.g] = +kp.dataset.keep; return renderResults(); }
+    const tr = e.target.closest('[data-dg-trash]');
+    if (tr) return trashDupGroup(+tr.dataset.dgTrash);
+  }
+  if (S.q && e.target.closest('.item')) noteSearch(true);
   if (e.target.closest('[data-act="more"]')) { S.limit += 300; return runSearch({ keepScroll: true }); }
   const mt = e.target.closest('[data-mode-to]');
   if (mt) { e.preventDefault(); return setMode(mt.dataset.modeTo); }
@@ -2318,13 +2405,24 @@ qEl.addEventListener('compositionend', () => { composing = false; onQuery(); });
 qEl.addEventListener('input', e => { if (!composing && !e.isComposing) onQuery(); });
 function onQuery() {
   S.q = qEl.value;
+  if (S.dupView && S.q.trim()) { S.dupView = false; renderSidebar(); }
+  if (S.q.trim()) closeQPanel();
   $('#q-clear').hidden = !S.q;
   S.limit = 200;
   scheduleSearch(S.q.trim() ? (S.fuzzy && S.scope !== 'name' ? 450 : 260) : 60);
 }
 qEl.addEventListener('keydown', e => {
   if (e.isComposing || composing) return;
-  if (e.key === 'Enter') { e.preventDefault(); S.q = qEl.value; runSearch(); }
+  if (qpOpen()) {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); return qpMove(e.key === 'ArrowDown' ? 1 : -1); }
+    if (e.key === 'Enter' && qpIdx >= 0) {
+      e.preventDefault();
+      const row = $$('#qpanel .qp-row')[qpIdx], en = row && qpEntry(+row.dataset.qp);
+      return en && applySearch(en);
+    }
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); return closeQPanel(); }
+  } else if (e.key === 'ArrowDown' && !qEl.value.trim()) { e.preventDefault(); return openQPanel(); }
+  if (e.key === 'Enter') { e.preventDefault(); S.q = qEl.value; closeQPanel(); runSearch(); noteSearch(true); }
   else if (e.key === 'Escape' && qEl.value) { e.preventDefault(); e.stopPropagation(); qEl.value = ''; onQuery(); }
   else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); moveCursor(e.key === 'ArrowDown' ? 1 : -1, e.shiftKey); }
 });
@@ -2342,6 +2440,261 @@ $('#mode').addEventListener('click', e => { const b = e.target.closest('[data-mo
 $('#scope').onchange = e => { S.scope = e.target.value; api('settings', { scope: S.scope }).catch(() => {}); runSearch(); };
 $('#sort').onchange = e => { S.sort = e.target.value; api('settings', { sort: S.sort }).catch(() => {}); runSearch(); };
 $('#help-btn').onclick = showHelp;
+
+// ===================================================================== 檢索歷史、保存的檢索
+// 歷史：檢索停留三秒、按回車或打開了結果才記（打字途中的半截詞不記），存在本機資料庫裡，最多 60 條。
+// 保存的檢索：連同匹配方式、模糊、範圍和篩選一起存，在側欄或檢索框的下拉裡一點即重跑。
+const CLOCK = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.2"/><path d="M12 7.4V12l3.1 2"/></svg>';
+const DEFAULT_FILTER = () => ({ root: null, dir: null, kind: null, tag: null, starred: false, only: null, exts: [] });
+const hasFilter = (f = S.filter) => !!(f.root || f.dir || f.kind || f.tag || f.starred || f.only || (f.exts && f.exts.length));
+function canon(v) {
+  if (Array.isArray(v)) return '[' + v.map(canon).join(',') + ']';
+  if (v && typeof v === 'object') return '{' + Object.keys(v).sort().map(k => JSON.stringify(k) + ':' + canon(v[k])).join(',') + '}';
+  return JSON.stringify(v === undefined ? null : v);
+}
+function currentParams() {
+  const f = S.filter, flt = {};
+  for (const k of ['root', 'dir', 'kind', 'tag']) if (f[k]) flt[k] = f[k];
+  if (f.starred) flt.starred = true;
+  if (f.exts && f.exts.length) flt.exts = f.exts.slice();
+  if (f.only) flt.only = f.only;
+  const p = { mode: S.mode, scope: S.scope };
+  if (S.fuzzy) p.fuzzy = S.fzSim;
+  if (S.sort !== 'relevance') p.sort = S.sort;
+  if (Object.keys(flt).length) p.filter = flt;
+  return p;
+}
+const searchKey = (q, p) => canon([(q || '').trim(), p || {}]);
+const isCurrentSearch = e => searchKey(e.q, e.params) === searchKey(S.q, currentParams());
+const SCOPE_SHORT = { name: '僅文件名', all: '名稱與全文', content: '僅全文' };
+function searchSummary(e) {
+  const p = e.params || {}, f = p.filter || {}, out = [];
+  out.push(MODE_LABEL[p.mode] || '異體');
+  if (p.fuzzy) out.push('模糊 ≥ ' + Math.round(p.fuzzy * 100) + '%');
+  out.push(SCOPE_SHORT[p.scope] || '');
+  if (f.exts && f.exts.length) out.push(f.exts.map(x => x ? x.toUpperCase() : '無擴展名').join(' '));
+  if (f.kind === 'notext') out.push('無文字層');
+  if (f.dir) out.push(f.dir.split('/').pop());
+  else if (f.root) { const r = rootOf(f.root); if (r) out.push(r.name); }
+  if (f.only) out.push('範圍：' + onlyLabel(f.only));
+  if (f.tag) { const t = S.tags.find(t => t.id === f.tag); if (t) out.push('#' + t.name); }
+  if (f.starred) out.push('已收藏');
+  return out.filter(Boolean);
+}
+function fmtAgo(ts) {
+  const d = Date.now() / 1000 - ts;
+  if (d < 60) return '剛才';
+  if (d < 3600) return Math.floor(d / 60) + ' 分鐘前';
+  if (d < 86400) return Math.floor(d / 3600) + ' 小時前';
+  if (d < 86400 * 7) return Math.floor(d / 86400) + ' 天前';
+  return fmtDate(ts);
+}
+let histTimer = 0, lastHistKey = '';
+function noteSearch(now) {
+  clearTimeout(histTimer);
+  if (!S.q.trim() || S.dupView || S.settings.history_on === '0') return;
+  const go = () => {
+    if (!S.q.trim() || S.dupView) return;            // 三秒內清空了檢索框或轉去查重：不記
+    const p = currentParams(), key = searchKey(S.q, p);
+    if (key === lastHistKey) return;
+    lastHistKey = key;
+    api('searches/add', { kind: 'h', q: S.q.trim(), params: p }).then(r => { S.searches = r; if (qpOpen()) renderQPanel(); }).catch(() => {});
+  };
+  if (now) go(); else histTimer = setTimeout(go, 3000);
+}
+function applySearch(e) {
+  closeQPanel();
+  const p = e.params || {};
+  S.dupView = false;
+  qEl.value = S.q = e.q || '';
+  $('#q-clear').hidden = !S.q;
+  if (p.mode && p.mode !== S.mode) {
+    S.mode = p.mode;
+    $$('#mode button').forEach(b => b.classList.toggle('on', b.dataset.mode === S.mode));
+    api('settings', { mode: S.mode }).catch(() => {});
+  }
+  const fz = !!p.fuzzy;
+  if (fz !== S.fuzzy || (fz && p.fuzzy !== S.fzSim)) {
+    S.fuzzy = fz;
+    if (fz) S.fzSim = p.fuzzy;
+    renderFuzzy();
+    api('settings', { fuzzy: S.fuzzy ? '1' : '0', fuzzy_sim: S.fzSim }).catch(() => {});
+  }
+  if (p.scope && p.scope !== S.scope) { S.scope = p.scope; $('#scope').value = S.scope; api('settings', { scope: S.scope }).catch(() => {}); }
+  const sort = p.sort || 'relevance';
+  if (sort !== S.sort) { S.sort = sort; $('#sort').value = sort; api('settings', { sort }).catch(() => {}); }
+  S.filter = Object.assign(DEFAULT_FILTER(), p.filter || {});
+  S.limit = 200;
+  renderSidebar();
+  runSearch();
+  if (e.kind === 'h' || e.q) noteSearch(true);
+}
+async function saveCurrentSearch(fromEntry) {
+  const q = fromEntry ? fromEntry.q : S.q.trim();
+  const params = fromEntry ? fromEntry.params : currentParams();
+  const def = q || searchSummary({ params }).slice(2).join(' ') || '我的檢索';
+  const name = await promptDialog('保存檢索', '起個名字。之後在側欄「已保存的檢索」或檢索框的下拉裡一點即可重跑——連同匹配方式、模糊、範圍和篩選。', def, '保存');
+  if (!name || !name.trim()) return;
+  try {
+    S.searches = await api('searches/add', { kind: 's', name: name.trim(), q, params });
+    renderSidebar(); renderResHead();
+    if (qpOpen()) renderQPanel();
+    toast('已保存到側欄「已保存的檢索」');
+  } catch (err) { fail(err); }
+}
+async function savedMenu(x, y, e) {
+  showMenu(x, y, [
+    { label: '重跑', icon: 'search', act: () => applySearch(e) },
+    { sep: true },
+    { label: '重命名…', icon: 'pencil', act: async () => {
+      const n = await promptDialog('重命名保存的檢索', '', e.name);
+      if (n && n.trim()) { S.searches = await api('searches/update', { id: e.id, name: n.trim() }); renderSidebar(); renderResHead(); }
+    } },
+    { label: '用當前檢索更新', icon: 'refresh', act: async () => {
+      S.searches = await api('searches/update', { id: e.id, q: S.q.trim(), params: currentParams() });
+      renderSidebar(); renderResHead(); toast(`「${e.name}」已更新為當前的檢索`);
+    } },
+    { sep: true },
+    { label: '刪除', icon: 'trash', danger: true, act: async () => {
+      S.searches = await api('searches/remove', { id: e.id }); renderSidebar(); renderResHead();
+      toast(`已刪除「${e.name}」`);
+    } },
+  ]);
+}
+// ---- 檢索框下的下拉：已保存在前，最近的在後
+let qpIdx = -1;
+const qpOpen = () => !$('#qpanel').hidden;
+function qpEntries() {
+  const saved = S.searches.saved, sk = new Set(saved.map(e => searchKey(e.q, e.params)));
+  return { saved, hist: S.searches.history.filter(e => !sk.has(searchKey(e.q, e.params))) };
+}
+function qpRow(e, kind) {
+  const meta = searchSummary(e).map(x => `<span class="qp-tag">${esc(x)}</span>`).join('');
+  const main = kind === 's'
+    ? esc(e.name) + (e.q && e.q !== e.name ? `<span class="qp-sub">「${esc(e.q)}」</span>` : '')
+    : (e.q ? esc(e.q) : '<span class="qp-sub" style="margin:0">只用篩選</span>');
+  return `<div class="qp-row" data-qp="${e.id}">
+    <span class="qp-ic${kind === 's' ? ' saved' : ''}">${kind === 's' ? I.starFill : CLOCK}</span>
+    <span class="qp-main"><span class="qp-q">${main}</span><span class="qp-meta">${meta}</span></span>
+    ${kind === 'h' ? `<span class="qp-time">${fmtAgo(e.ts)}</span>` : ''}
+    <span class="qp-act">${kind === 'h' ? `<button data-qp-save="${e.id}" title="保存這個檢索">${I.star}</button>` : ''}
+      <button data-qp-del="${e.id}" title="${kind === 'h' ? '從歷史中刪去' : '刪除這個保存的檢索'}">${I.x}</button></span></div>`;
+}
+function renderQPanel() {
+  const { saved, hist } = qpEntries(), el = $('#qpanel');
+  qpIdx = -1;
+  if (!saved.length && !hist.length) {
+    el.innerHTML = `<div class="qp-empty">${S.settings.history_on === '0' ? '檢索歷史的記錄已在設置裡關閉。' :
+      '還沒有檢索歷史。檢索後停留片刻、按回車或打開結果，就會記在這裡。'}<br>點結果上方的 ☆ 可以把常用的檢索保存下來。</div>`;
+    return;
+  }
+  let h = '';
+  if (saved.length) h += `<div class="qp-h"><span>已保存</span></div>` + saved.map(e => qpRow(e, 's')).join('');
+  if (hist.length) h += `<div class="qp-h"><span>最近</span><button class="qp-link" data-qp-clear>清除歷史</button></div>` + hist.map(e => qpRow(e, 'h')).join('');
+  el.innerHTML = h;
+}
+function openQPanel() { renderQPanel(); $('#qpanel').hidden = false; $('#q-hist').classList.add('on'); }
+function closeQPanel() { $('#qpanel').hidden = true; $('#q-hist').classList.remove('on'); qpIdx = -1; }
+function qpMove(d) {
+  const rows = $$('#qpanel .qp-row');
+  if (!rows.length) return;
+  qpIdx = qpIdx < 0 ? (d > 0 ? 0 : rows.length - 1) : (qpIdx + d + rows.length) % rows.length;
+  rows.forEach((r, i) => r.classList.toggle('on', i === qpIdx));
+  rows[qpIdx].scrollIntoView({ block: 'nearest' });
+}
+const qpEntry = id => S.searches.saved.find(e => e.id === id) || S.searches.history.find(e => e.id === id);
+$('#qpanel').addEventListener('mousedown', e => e.preventDefault());      // 不讓檢索框失去焦點
+$('#qpanel').addEventListener('click', async e => {
+  const del = e.target.closest('[data-qp-del]'), sv = e.target.closest('[data-qp-save]');
+  if (e.target.closest('[data-qp-clear]')) {
+    S.searches = await api('searches/remove', { clear: true });
+    lastHistKey = '';
+    return renderQPanel();
+  }
+  if (del) { S.searches = await api('searches/remove', { id: +del.dataset.qpDel }); renderSidebar(); renderResHead(); return renderQPanel(); }
+  if (sv) { const en = qpEntry(+sv.dataset.qpSave); closeQPanel(); return en && saveCurrentSearch(en); }
+  const row = e.target.closest('.qp-row');
+  if (row) { const en = qpEntry(+row.dataset.qp); if (en) applySearch(en); }
+});
+$('#q-hist').addEventListener('mousedown', e => e.preventDefault());
+$('#q-hist').onclick = () => { if (qpOpen()) closeQPanel(); else { qEl.focus(); openQPanel(); } };
+qEl.addEventListener('mousedown', () => { if (!qEl.value.trim()) setTimeout(() => { if (!qEl.value.trim()) openQPanel(); }, 0); });
+qEl.addEventListener('blur', () => setTimeout(() => { if (document.activeElement !== qEl) closeQPanel(); }, 120));
+document.addEventListener('mousedown', e => { if (qpOpen() && !e.target.closest('.search')) closeQPanel(); });
+
+// ===================================================================== 查重：內容相同的文件
+let dupSeq = 0;
+function openDupView() {
+  S.dupView = true;
+  S.dupData = null;
+  S.dupKeep = {};
+  closeQPanel();
+  renderSidebar();
+  loadDups();
+}
+async function loadDups() {
+  const seq = ++dupSeq, p = new URLSearchParams();
+  filterParams(p);
+  S.loading = true;
+  renderResults();
+  try {
+    const r = await api('duplicates?' + p);
+    if (seq !== dupSeq || !S.dupView) return;
+    S.dupData = r;
+    S.items = r.groups.flatMap(g => g.items);
+    if (!S.items.some(i => i.id === S.cur)) { S.cur = S.items.length ? S.items[0].id : null; S.sel = new Set(S.cur ? [S.cur] : []); }
+    S.loading = false;
+    renderResults();
+    if (S.cur && (!S.pv || S.pv.id !== S.cur)) loadPreview(S.cur);
+    if (!hasFilter()) S.dupCount = r.count;            // 側欄的數字只記不加篩選時的總組數
+    renderSidebar();
+  } catch (err) { S.loading = false; renderResults(); fail(err); }
+}
+function renderDupView(list) {
+  const d = S.dupData;
+  if (!d) { list.innerHTML = `<div class="empty"><span class="spin" style="width:22px;height:22px"></span><h3>正在比對……</h3><p>第一次要讀一下各文件的開頭、中間和結尾，稍等片刻</p></div>`; return; }
+  if (!d.groups.length) {
+    list.innerHTML = `<div class="empty">${I.copy.replace('<svg', '<svg class="big-ic"')}<h3>沒有內容相同的文件</h3><p>${hasFilter() ? '當前篩選範圍內' : '資料庫裡'}沒有找到重複的文件。</p></div>`;
+    return;
+  }
+  list.innerHTML = d.groups.map((g, gi) => {
+    const keep = S.dupKeep[gi] != null ? S.dupKeep[gi] : g.items[0].id;
+    // 同組各份的路徑只顯示彼此不同的那一截（共同的上層文件夾省作「…」），完整路徑在懸停提示裡
+    const segs = g.items.map(it => relDir(it).split(' › '));
+    let k = 0;
+    while (segs.every(s => k < s.length - 1 && s[k] === segs[0][k])) k++;
+    const short = i => (k ? '… › ' : '') + segs[i].slice(k).join(' › ');
+    return `<div class="dgroup" data-g="${gi}">
+      <div class="dg-head"><span class="dg-kind ${g.kind}" title="${g.kind === 't' ? '抽出的文字完全相同（文件本身可能不同，如掃描質量、書籤）' : '文件逐字節相同'}">${g.kind === 't' ? '文字相同' : '完全相同'}</span>
+        <span>${g.items.length} 份 · 每份 ${fmtSize(g.size)}</span><span class="grow"></span>
+        <button class="btn mini danger" data-dg-trash="${gi}">其餘 ${g.items.length - 1} 份移到廢紙簍</button></div>
+      ${g.items.map((it, ii) => `<div class="item dg-row${it.id === S.cur ? ' sel' : ''}" data-id="${it.id}">
+        <button class="dg-keep${it.id === keep ? ' on' : ''}" data-keep="${it.id}" data-g="${gi}" title="${it.id === keep ? '保留這一份' : '點一下改為保留這一份'}">${it.id === keep ? '保留' : '移走'}</button>
+        <span class="badge k-${it.kind}">${esc(badgeText(it))}</span>
+        <span class="dg-main"><span class="dg-name" title="${esc(it.name)}">${esc(it.name)}</span>
+        <span class="dg-path" title="${esc(it.dir)}">${esc(short(ii))}</span></span>
+        <span class="dg-date">${fmtDate(it.mtime)}</span></div>`).join('')}</div>`;
+  }).join('') + (d.count > d.groups.length ? `<p class="dg-more">只列出前 ${d.groups.length} 組（共 ${fmtNum(d.count)} 組），可在側欄按類型或文件夾縮小範圍。</p>` : '');
+}
+async function trashDupGroup(gi) {
+  const g = S.dupData.groups[gi], keep = S.dupKeep[gi] != null ? S.dupKeep[gi] : g.items[0].id;
+  const keepIt = g.items.find(it => it.id === keep), ids = g.items.filter(it => it.id !== keep).map(it => it.id);
+  if (g.kind === 'b') {
+    const v = await api('dups/verify', { ids: [keep].concat(ids) });
+    if (!v.same) return toast('逐字節核對後發現它們並不完全相同' + (v.why ? '（' + v.why + '）' : '') + '，沒有移動', { err: true });
+  }
+  if (!await confirmDialog(`把其餘 ${ids.length} 份移到廢紙簍？`,
+    `保留：${esc(relDir(keepIt))} › <b>${esc(keepIt.name)}</b><br>可以在訪達的廢紙簍中用「放回原處」恢復，收藏、標籤、備註會一併清除。` +
+    (g.kind === 't' ? '<br>注意：這幾份只是<b>抽出的文字</b>相同，文件本身可能不同（如掃描質量、書籤）。' : ''), '移到廢紙簍', true)) return;
+  try {
+    const r = await api('trash', { ids });
+    if (r.errors && r.errors.length) toast(r.errors.join('；'), { err: true });
+    if (r.trashed) toast(`已移到廢紙簍 ${r.trashed} 個文件`);
+    S.dupKeep = {};
+    await refreshState();
+    loadDups();
+  } catch (err) { fail(err); }
+}
 function renderFuzzy() {
   $('#fz').classList.toggle('on', S.fuzzy);
   $('#fz-btn').setAttribute('aria-pressed', S.fuzzy ? 'true' : 'false');
@@ -2374,6 +2727,11 @@ function showHelp() {
       <p class="hint" style="margin:0">點側欄的文件夾 —— 只在該文件夾內檢索；⌘ 點擊可同時選幾個文件夾<br>
       在結果上右鍵 →「只在選中項中檢索」／「加入檢索範圍」—— 自選若干文件和文件夾；點結果上方的「範圍」標籤可查看、移除<br>
       預覽全文時按 ⌘F —— 只在當前文件內查找（與上方檢索框互不干擾，模糊開關也各自獨立）</p></div>
+    <div class="field"><label>檢索歷史與保存的檢索</label>
+      <p class="hint" style="margin:0">點空的檢索框、點框裡的時鐘圖標或按 ↓，列出保存的檢索和最近的檢索（連同匹配方式、模糊、範圍和篩選），↑↓ 選、回車重跑。<br>
+      結果上方的 ☆ 把當前檢索保存到側欄。側欄「類型」按擴展名篩選，可多選，「＋」可輸入任意擴展名。</p></div>
+    <div class="field"><label>重複文件</label>
+      <p class="hint" style="margin:0">檢索結果裡內容相同的文件合成一條，點「另有 N 個副本」展開。側欄「重複文件」列出全部重複的組，選留一份，其餘移到廢紙簍（移動前逐字節核對）。</p></div>
     <div class="field"><label>PDF 原件</label>
       <p class="hint" style="margin:0">「原件」逐頁顯示，黃底標出命中。先單擊選中左側的文件，再把鼠標停在它片段裡命中的詞上，右側預覽（全文或原件）就跳到那一處。<br>
       雙擊命中的詞，在全文與原件之間來回跳（原件上用紅框標出）；全文裡其他位置可右鍵 →「在原件中查看此處」，原件上右鍵 →「在全文中查看這段」。需要選字時點「系統閱讀器」。<br>
@@ -2453,6 +2811,10 @@ async function openSettings() {
       ${S.projects.length ? `<div class="proj-list">${S.projects.map(p => `<div title="${esc(p)}">${esc(p.replace(/^\/Users\/[^/]+/, '~'))}</div>`).join('')}</div>` : ''}</div>
       <div class="field"><label class="switch"><input type="checkbox" id="st-code" ${st.code_fulltext === '1' ? 'checked' : ''}>代碼與配置文件也收全文</label>
       <p class="hint" style="margin:4px 0 0 44px">json、yaml、py、js、css、sql 等默認只收文件名，免得輸入法詞庫、腳本、導出數據淹沒檢索結果。</p></div>
+      <div class="field"><label class="switch"><input type="checkbox" id="st-merge" ${st.merge_dups !== '0' ? 'checked' : ''}>合併內容相同的文件</label>
+      <p class="hint" style="margin:4px 0 0 44px">檢索結果裡文字相同（或逐字節相同）的文件合成一條，點「另有 N 個副本」展開。</p></div>
+      <div class="field"><label class="switch"><input type="checkbox" id="st-hist" ${st.history_on !== '0' ? 'checked' : ''}>記錄檢索歷史</label>
+      <p class="hint" style="margin:4px 0 0 44px">只存在本機的資料庫裡，最多 60 條。<a href="#" data-clear-hist>清除歷史</a></p></div>
       <div class="field"><label>排除</label><p class="hint">每行一條：文件或文件夾名（可用 * 通配），或以 / 開頭的文件夾路徑（在文件夾上右鍵「排除此文件夾」會自動添加）。以「.」開頭的隱藏文件總是跳過。</p>
       <textarea id="st-excl">${esc(st.excludes || '')}</textarea></div>
       <div class="field"><label>字表與工具</label><div class="kv">
@@ -2477,6 +2839,7 @@ async function openSettings() {
     rescan_minutes: $('#st-rescan', el).value, excludes: $('#st-excl', el).value,
     watch: $('#st-watch', el).checked ? '1' : '0', skip_projects: $('#st-proj', el).checked ? '1' : '0',
     code_fulltext: $('#st-code', el).checked ? '1' : '0',
+    merge_dups: $('#st-merge', el).checked ? '1' : '0', history_on: $('#st-hist', el).checked ? '1' : '0',
   };
   try {
     const res = await api('settings', patch);
@@ -2602,6 +2965,12 @@ async function poll() {
 }
 
 function renderAll() { renderSidebar(); renderResults(); renderPreview(); }
+document.addEventListener('click', async e => {
+  const a = e.target.closest('[data-clear-hist]');
+  if (!a) return;
+  e.preventDefault();
+  try { S.searches = await api('searches/remove', { clear: true }); lastHistKey = ''; toast('已清除檢索歷史'); } catch (err) { fail(err); }
+});
 
 // ===================================================================== 右鍵
 // 結果、側欄、文件夾樹、原件頁面有各自的菜單（在各自的監聽器裡處理）。選中的文字、輸入框用系統菜單：
@@ -2688,6 +3057,7 @@ async function init() {
   try {
     const st = await api('state');
     S.roots = st.roots; S.tags = st.tags; S.stats = st.stats; S.status = st.status;
+    try { S.searches = await api('searches'); } catch (err) { /* 舊數據庫 */ }
     S.settings = st.settings; S.meta = st.variant_meta; S.tools = st.tools; S.db = st.db;
     S.tagColors = st.tag_colors; S.customGroups = st.custom_groups; S.defaults = st.defaults;
     S.mode = ['exact', 'st', 'full'].includes(st.settings.mode) ? st.settings.mode : 'full';

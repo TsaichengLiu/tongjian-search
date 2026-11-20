@@ -43,6 +43,9 @@ CREATE TABLE IF NOT EXISTS tags(id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NUL
 CREATE TABLE IF NOT EXISTS file_tags(file_id INTEGER, tag_id INTEGER, PRIMARY KEY(file_id, tag_id));
 CREATE INDEX IF NOT EXISTS file_tags_tag ON file_tags(tag_id);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS searches(id INTEGER PRIMARY KEY, kind TEXT NOT NULL, name TEXT, q TEXT,
+  params TEXT, ts REAL, uses INTEGER DEFAULT 0);
+CREATE INDEX IF NOT EXISTS searches_kind ON searches(kind, ts);
 """
 
 DEFAULT_EXCLUDES = ["node_modules", "__pycache__", "venv", "site-packages", "Pods", "DerivedData",
@@ -64,6 +67,8 @@ DEFAULT_SETTINGS = {
     "find_fuzzy": "0",
     "find_sim": "0.7",
     "pdf_view": "pages",
+    "history_on": "1",
+    "merge_dups": "1",
 }
 # 含這些文件的文件夾視為代碼項目，整個跳過
 PROJECT_MARKERS = {"package.json", "pyproject.toml", "setup.py", "requirements.txt", "Cargo.toml",
@@ -438,6 +443,7 @@ class Library(object):
         self.thumb_dir = os.path.join(os.path.expanduser("~/Library/Caches/TongJian"), "thumbs-" +
                                       hashlib.sha1(os.path.realpath(db_path).encode("utf-8")).hexdigest()[:10])
         self.regex_cache = {}
+        self._dup_cache = OrderedDict()    # 重複文件的內容指紋（按文件 id、修改時間、大小），只在內存裡
         self.search_gen = ""               # 最近一次檢索請求的編號：舊的、還在跑的檢索見到新編號就提前收工
         self.ver = 1                       # 數據版本：統計結果按版本緩存
         self._cache = {}
@@ -605,6 +611,7 @@ class Library(object):
                         self.text_cache.clear()     # 5 分鐘沒有檢索：清空全文緩存
                         self.page_cache.clear()
                         self.box_cache.clear()
+                        self._dup_cache.clear()     # 查重的內容指紋（再查時重算，一兩秒）
                         self.norm.drop_content_maps()   # 以及模糊檢索的字表、名稱表（用時幾毫秒重建）
                         self.names.drop_fuzzy()
                     release_memory()
@@ -1227,6 +1234,11 @@ class Library(object):
             d = p["dir"].rstrip("/")
             where.append("(f.dir=? OR (f.dir>=? AND f.dir<?))")
             args += [d, d + "/", d + "0"]
+        exts = [x.strip().lstrip(".").lower() for x in (p.get("exts") or "").split(",")]
+        exts = [("" if x == "-" else x) for x in exts if x][:60]
+        if exts:
+            where.append("f.ext IN (%s)" % ",".join("?" * len(exts)))
+            args += exts
         k = p.get("kind")
         if k == "notext":
             where.append(NEAR_EMPTY_SQL + " AND f.kind='pdf'")
@@ -1402,7 +1414,7 @@ class Library(object):
                 cols, ("WHERE " + " AND ".join(where)) if where else "", order)
             rows = c.execute(sql, args + [limit + 1]).fetchall()
             res["truncated"] = len(rows) > limit
-            res["items"] = [self._item(r) for r in rows[:limit]]
+            res["items"] = self._merge_dups(c, [self._item(r) for r in rows[:limit]], res)
             res["total"] = c.execute("SELECT COUNT(*) FROM files f %s" % (
                 ("WHERE " + " AND ".join(where)) if where else ""), args).fetchone()[0]
             self._attach_tags(res["items"])
@@ -1448,7 +1460,7 @@ class Library(object):
                         it["sim"] = round(info["sim"], 3)
                     found[r["id"]] = it
         # ---- 文件夾名
-        if scope in ("all", "name") and not p.get("kind") and not p.get("tag") and \
+        if scope in ("all", "name") and not p.get("kind") and not p.get("exts") and not p.get("tag") and \
                 p.get("starred") not in ("1", 1, True, "true"):
             for it in self._match_folders(c, p, Q, dcand):
                 found[it["id"]] = it
@@ -1541,10 +1553,11 @@ class Library(object):
         if len(items) > limit:
             items = items[:limit]
             res["truncated"] = True
+        items = self._merge_dups(c, items, res)
         res["items"] = items
         res["total"] = len(items)
         res["hits"] = sum(x.get("hits") or 0 for x in items)
-        self._attach_tags(items)
+        self._attach_tags(items + [d for it in items for d in it.get("dups") or []])
         res["took"] = round(_now() - t0, 3)
         return res
 
@@ -1632,7 +1645,7 @@ class Library(object):
     # 「恢復默認設置」會重置的項；自定義異體字與排除列表另行勾選
     RESETTABLE = ("cross_punct", "rescan_minutes", "watch", "skip_projects", "code_fulltext", "mode", "scope",
                   "sort", "collation", "sidebar_w", "list_w", "folder_view", "fuzzy", "fuzzy_sim",
-                  "reader_size", "find_fuzzy", "find_sim", "pdf_view")
+                  "reader_size", "find_fuzzy", "find_sim", "pdf_view", "history_on", "merge_dups")
 
     def reset_settings(self, variants=False, excludes=False):
         keys = list(self.RESETTABLE) + (["custom_variants"] if variants else []) + (["excludes"] if excludes else [])
@@ -1888,6 +1901,199 @@ class Library(object):
             boxes = out
         res["boxes"] = boxes
         return res
+
+    # ------------------------------------------------------------------ 重複文件
+    # 「相同」：有全文的文件比抽出的文字（存庫的壓縮文字逐字節相同即文字相同）；其他文件比字節——
+    # 先用快速指紋（大小 + 頭、中、尾各 64 KB）篩，移到廢紙簍之前再整個文件逐字節核對（dups_verify）。
+    def _qhash(self, path, size):
+        h = hashlib.sha1(str(size).encode("ascii"))
+        with open(path, "rb") as f:
+            for off in sorted(set((0, max(0, size // 2 - 32768), max(0, size - 65536)))):
+                f.seek(off)
+                h.update(f.read(65536))
+        return h.digest()
+
+    DUP_COLS = "f.id, f.status, f.chars, f.size, f.ext, f.mtime, length(ct.z)"   # length() 不讀出正文
+
+    def _dup_keys(self, c, rows):
+        """rows：(id, status, chars, size, ext, mtime, zlen) 的可迭代對象 → {id: 內容鍵}，只留有重複的。
+        先按（字數, 壓縮後長度）或（大小, 擴展名）分桶，桶裡不止一個的才算指紋。"""
+        by = defaultdict(list)
+        for fid, status, chars, size, ext, mtime, zlen in rows:
+            if status == 1 and zlen:
+                by[("t", chars, zlen)].append((fid, int(mtime or 0), size, zlen))
+            elif size and size >= 1024:
+                by[("b", size, ext)].append((fid, int(mtime or 0), size, zlen))
+        keys, cnt = {}, defaultdict(int)
+        cache = self._dup_cache
+        for k, lst in by.items():
+            if len(lst) < 2:
+                continue
+            for fid, mtime, size, zlen in lst:
+                ck = (fid, k[0], mtime, size, zlen)
+                d = cache.get(ck)
+                if d is None:
+                    try:
+                        if k[0] == "t":
+                            z = c.execute("SELECT z FROM content WHERE id=?", (fid,)).fetchone()
+                            d = hashlib.sha1(z[0]).digest() if z else None
+                        else:
+                            pr = c.execute("SELECT path FROM files WHERE id=?", (fid,)).fetchone()
+                            d = self._qhash(pr[0], size) if pr else None
+                    except (OSError, TypeError):
+                        d = None
+                    if d is None:
+                        continue
+                    cache[ck] = d
+                    if len(cache) > 20000:
+                        cache.pop(next(iter(cache)))
+                keys[fid] = (k[0], d)
+                cnt[(k[0], d)] += 1
+        return dict((i, k) for i, k in keys.items() if cnt[k] > 1)
+
+    def _merge_dups(self, c, items, res):
+        """結果裡內容相同的文件合成一條：第一個（排序最前）留在列表裡，其餘放到它的 dups 裡。"""
+        if self.setting("merge_dups") == "0":
+            return items
+        ids = [it["id"] for it in items if it["id"] > 0]
+        if len(ids) < 2:
+            return items
+        rows = []
+        for i in range(0, len(ids), 900):
+            chunk = ids[i:i + 900]
+            rows += c.execute("SELECT %s FROM files f LEFT JOIN content ct ON ct.id=f.id WHERE f.id IN (%s)"
+                              % (self.DUP_COLS, ",".join("?" * len(chunk))), chunk).fetchall()
+        keys = self._dup_keys(c, rows)
+        if not keys:
+            return items
+        out, rep, merged = [], {}, 0
+        for it in items:
+            k = keys.get(it["id"])
+            if k is None:
+                out.append(it)
+            elif k in rep:
+                it.pop("snippets", None)
+                rep[k].setdefault("dups", []).append(it)
+                merged += 1
+            else:
+                it["dup_kind"] = k[0]
+                rep[k] = it
+                out.append(it)
+        res["merged"] = merged
+        return out
+
+    def duplicates(self, p):
+        """查重：整個資料庫（或當前篩選範圍）裡內容相同的文件，按可騰出的空間排序。"""
+        self.last_use = _now()
+        c = self.conn()
+        where, args = self._filters(p)
+        cur = c.cursor()
+        cur.arraysize = 2000
+        cur.execute("SELECT %s FROM files f LEFT JOIN content ct ON ct.id=f.id %s" % (
+            self.DUP_COLS, ("WHERE " + " AND ".join(where)) if where else ""), args)
+        keys = self._dup_keys(c, (r for b in iter(cur.fetchmany, []) for r in b))
+        groups = defaultdict(list)
+        for fid, k in keys.items():
+            groups[k].append(fid)
+        sizes, kl = {}, list(keys)
+        for i in range(0, len(kl), 900):
+            chunk = kl[i:i + 900]
+            sizes.update(c.execute("SELECT id, size FROM files WHERE id IN (%s)" % ",".join("?" * len(chunk)), chunk))
+        order = []
+        for k, ids in groups.items():
+            size = max(sizes.get(i) or 0 for i in ids)
+            order.append((size * (len(ids) - 1), size, k, ids))
+        order.sort(key=lambda g: -g[0])
+        out = []
+        cols = "f.id, f.root_id, f.name, f.dir, f.ext, f.kind, f.size, f.mtime, f.starred, f.status, f.pages, f.chars, f.note"
+        for wasted, size, k, ids in order[:500]:          # 只為列出的組建條目
+            items = [self._item(r) for r in c.execute("SELECT %s FROM files f WHERE f.id IN (%s)" % (
+                cols, ",".join("?" * len(ids))), ids)]
+            # 建議保留：不在「下載」裡的、文件名較完整的、較早的
+            items.sort(key=lambda it: ("/Downloads/" in (it["dir"] + "/"), -len(it["name"]), it["mtime"] or 0))
+            out.append({"kind": k[0], "items": items, "size": size, "wasted": wasted})
+        self._attach_tags([it for g in out for it in g["items"]])
+        return {"groups": out, "count": len(order), "wasted": sum(g[0] for g in order)}
+
+    def dups_verify(self, ids):
+        """移到廢紙簍之前：這幾個文件是否逐字節相同（有全文的再比一次文字）。"""
+        c = self.conn()
+        rows = c.execute("SELECT id, path, status FROM files WHERE id IN (%s)" % ",".join("?" * len(ids)), ids).fetchall()
+        if len(rows) != len(ids):
+            return {"same": False, "why": "有文件已不在資料庫裡"}
+        digests, texts = set(), set()
+        for fid, path, status in rows:
+            if status == 1:
+                z = c.execute("SELECT z FROM content WHERE id=?", (fid,)).fetchone()
+                texts.add(hashlib.sha1(z[0]).hexdigest() if z else None)
+            try:
+                h = hashlib.sha1()
+                with open(path, "rb") as f:
+                    for blk in iter(lambda: f.read(1 << 20), b""):
+                        h.update(blk)
+                digests.add(h.hexdigest())
+            except OSError:
+                return {"same": False, "why": "有文件已不在原處"}
+        return {"same": len(digests) == 1, "text_same": len(texts) == 1}
+
+    # ------------------------------------------------------------------ 檢索歷史、保存的檢索
+    def searches(self):
+        c = self.conn()
+        out = {"history": [], "saved": []}
+        for r in c.execute("SELECT id, kind, name, q, params, ts, uses FROM searches ORDER BY ts DESC"):
+            try:
+                params = json.loads(r[4] or "{}")
+            except ValueError:
+                params = {}
+            e = {"id": r[0], "kind": r[1], "name": r[2] or "", "q": r[3] or "", "params": params, "ts": r[5], "uses": r[6]}
+            out["history" if r[1] == "h" else "saved"].append(e)
+        out["saved"].sort(key=lambda e: e["name"])
+        return out
+
+    def add_search(self, kind, q, params, name=""):
+        kind = "s" if kind == "s" else "h"
+        q = (q or "").strip()[:500]
+        pj = json.dumps(params or {}, ensure_ascii=False, sort_keys=True)[:8000]
+        c = self.conn()
+        if kind == "h":
+            if self.setting("history_on") == "0" or not q:
+                return
+            r = c.execute("SELECT id FROM searches WHERE kind='h' AND q=? AND params=?", (q, pj)).fetchone()
+            last = c.execute("SELECT id, q, ts FROM searches WHERE kind='h' ORDER BY ts DESC LIMIT 1").fetchone()
+            if last and last[1] == q and _now() - last[2] < 300 and not (r and r[0] == last[0]):
+                # 同一個詞剛剛又調了篩選、匹配方式：中途那條換成現在的，不一條條堆起來
+                if r:
+                    c.execute("DELETE FROM searches WHERE id=?", (last[0],))
+                    c.execute("UPDATE searches SET ts=?, uses=uses+1 WHERE id=?", (_now(), r[0]))
+                else:
+                    c.execute("UPDATE searches SET params=?, ts=? WHERE id=?", (pj, _now(), last[0]))
+            elif r:
+                c.execute("UPDATE searches SET ts=?, uses=uses+1 WHERE id=?", (_now(), r[0]))
+            else:
+                c.execute("INSERT INTO searches(kind, name, q, params, ts, uses) VALUES('h', '', ?, ?, ?, 1)", (q, pj, _now()))
+            c.execute("DELETE FROM searches WHERE kind='h' AND id NOT IN "
+                      "(SELECT id FROM searches WHERE kind='h' ORDER BY ts DESC LIMIT 60)")
+        else:
+            c.execute("INSERT INTO searches(kind, name, q, params, ts, uses) VALUES('s', ?, ?, ?, ?, 0)",
+                      ((name or q or "未命名").strip()[:80], q, pj, _now()))
+        c.commit()
+
+    def update_search(self, sid, name=None, q=None, params=None):
+        c = self.conn()
+        if name is not None:
+            c.execute("UPDATE searches SET name=? WHERE id=?", (name.strip()[:80] or "未命名", sid))
+        if q is not None:
+            c.execute("UPDATE searches SET q=?, params=?, ts=? WHERE id=?",
+                      (q.strip()[:500], json.dumps(params or {}, ensure_ascii=False, sort_keys=True)[:8000], _now(), sid))
+        c.commit()
+
+    def remove_search(self, sid=None, clear_history=False):
+        c = self.conn()
+        if clear_history:
+            c.execute("DELETE FROM searches WHERE kind='h'")
+        elif sid is not None:
+            c.execute("DELETE FROM searches WHERE id=?", (sid,))
+        c.commit()
 
     def _prune_thumbs(self):
         """刪掉已不在索引中的文件的縮略圖、文件改動前的舊縮略圖，總量超過上限時按最近使用時間淘汰。"""
@@ -2246,8 +2452,10 @@ class Library(object):
         tot = c.execute("SELECT COUNT(*), SUM(f.status=1), SUM(%s AND f.kind='pdf'), SUM(f.starred), SUM(f.chars) "
                         "FROM files f" % NEAR_EMPTY_SQL
                         ).fetchone()
+        exts = [[r[0] or "", r[1] or "other", r[2]] for r in c.execute(
+            "SELECT ext, MIN(kind), COUNT(*) AS n FROM files GROUP BY ext ORDER BY n DESC, ext")]
         return {"kinds": kinds, "files": tot[0] or 0, "texts": tot[1] or 0, "notext": tot[2] or 0,
-                "starred": tot[3] or 0, "chars": tot[4] or 0}
+                "starred": tot[3] or 0, "chars": tot[4] or 0, "exts": exts}
 
     def dirs(self, rid):
         """側欄文件夾樹：按路徑各段的自然序排好，前端按出現順序建樹即可。"""
