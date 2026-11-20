@@ -454,25 +454,21 @@ mark, .h1, .h2 { color: inherit; border-radius: 2px; }
 .pgbar .pg-pos, .pgbar .btn.mini { white-space: nowrap; flex: none; }
 .pgbar .grow { min-width: 4px; }
 /* 原件：逐頁圖片 + 標註 */
-.pdfv {
-  flex: 1; min-height: 0; overflow: auto; position: relative; padding: 12px; background: var(--paper);
-  outline: none; cursor: grab;
-}
+.pdfv { flex: 1; min-height: 0; overflow: auto; position: relative; background: var(--paper); outline: none; cursor: grab; }
 .pdfv.grabbing { cursor: grabbing; }
-.pdfv.over-text { cursor: pointer; }
-.pdfv-page {
-  position: relative; width: calc(100% * var(--z, 1)); aspect-ratio: 1 / var(--pa, 1.4142); margin: 0 auto 12px;
-  background: #fff; box-shadow: var(--shadow-2);
-}
-.pdfv-page:last-child { margin-bottom: 0; }
-.pdfv-page img { position: absolute; inset: 0; display: block; width: 100%; height: 100%; user-select: none; -webkit-user-select: none; -webkit-user-drag: none; }
-.pdfv-page img:not([src]) { visibility: hidden; }
+.pdfv-track { position: relative; }
+.pdfv-page { position: absolute; }
+.pdfv-pg { position: absolute; top: 0; background: #fff; box-shadow: var(--shadow-2); }
+.pdfv-pg img { position: absolute; inset: 0; display: block; width: 100%; height: 100%; user-select: none; -webkit-user-select: none; -webkit-user-drag: none; }
+.pdfv-pg img:not([src]) { visibility: hidden; }
 .pdfv-num { position: absolute; inset: 0; display: grid; place-items: center; color: #c9c2b6; font: 600 20px var(--ui); }
-.pdfv-page.err .pdfv-num::after { content: "　此頁無法顯示"; font-size: 13px; font-weight: 400; }
-.pdfv-page svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.pdfv-pg.err .pdfv-num::after { content: "　此頁無法顯示"; font-size: 13px; font-weight: 400; }
+.pdfv-pg svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+/* 檢索片段裡的命中：懸停時右側預覽跳過去 */
+.snip [data-s] { cursor: default; }
+.snip [data-s]:hover { box-shadow: inset 0 -2px 0 var(--hl-cur); }
 .pm-hit { fill: rgba(240, 180, 67, .40); }
 .pm-focus { fill: rgba(181, 64, 43, .08); stroke: #b5402b; stroke-width: 2.2; vector-effect: non-scaling-stroke; }
-.pm-hover { fill: rgba(47, 98, 181, .07); stroke: #2f62b5; stroke-width: 1.3; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
 /* 查找框自己的模糊開關 */
 .find-fz {
   flex: none; height: 26px; padding: 0 9px; border-radius: 7px; border: 1px solid var(--line-2); background: var(--panel);

@@ -1240,13 +1240,15 @@ class Library(object):
             where.append("f.starred=1")
         return where, args
 
-    def segs(self, text, spans, hl):
-        """把 [s,e) 命中區間切成 [[文字, 類型]]：0 普通，1 命中，2 異體命中，3 模糊命中裡與檢索詞不同的字。"""
+    def segs(self, text, spans, hl, base=None):
+        """把 [s,e) 命中區間切成 [[文字, 類型]]：0 普通，1 命中，2 異體命中，3 模糊命中裡與檢索詞不同的字。
+        給出 base 時，命中的段再附上所屬命中在全文中的起止 [文字, 類型, 起, 止]（片段懸停時讓預覽跳過去）。"""
         out = []
         pos = 0
         ex = self.norm.maps["exact"]
         qset, qlev, lm = hl.qset, hl.qlev, hl.lmap
         for s, e in spans:
+            at = [base + s, base + e] if base is not None else []
             if s < pos:
                 s = pos
             if s >= e:
@@ -1262,12 +1264,12 @@ class Library(object):
                 else:
                     k = 3
                 if k != kind and cur:
-                    out.append(["".join(cur), kind])
+                    out.append(["".join(cur), kind] + at)
                     cur = []
                 kind = k
                 cur.append(ch)
             if cur:
-                out.append(["".join(cur), kind])
+                out.append(["".join(cur), kind] + at)
             pos = e
         if pos < len(text):
             out.append([text[pos:], 0])
@@ -1357,7 +1359,7 @@ class Library(object):
             b = min(len(text), e + after)
             # 窗口內所有命中一起高亮
             inner = [(max(a, x), min(b, y)) for x, y in spans if y > a and x < b]
-            segs = self.segs(text[a:b], [(x - a, y - a) for x, y in inner], hl)
+            segs = self.segs(text[a:b], [(x - a, y - a) for x, y in inner], hl, base=a)
             for sg in segs:
                 sg[0] = re.sub(r"\s+", " ", sg[0])
             if a > 0:
@@ -1514,6 +1516,9 @@ class Library(object):
                     if u16:
                         for sn in it["snippets"]:
                             sn["pos"] = u16(sn["pos"])
+                            for sg in sn["segs"]:
+                                if len(sg) > 2:
+                                    sg[2], sg[3] = u16(sg[2]), u16(sg[3])
                     if Q.fuzzy:
                         it["score"] += 100.0 * (n - i) / max(n, 1) + 400.0 * info["sim"]
                         it["sim"] = max(it.get("sim") or 0, round(info["sim"], 3))

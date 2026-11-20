@@ -181,7 +181,8 @@ def fmt_time(t):
 def mark_segs(segs):
     """[[文字, 類型]] → 文本：命中用【】，模糊命中裡與檢索詞不同的字用〔〕。"""
     out, inhit = [], False
-    for t, k in segs:
+    for sg in segs:
+        t, k = sg[0], sg[1]
         if k and not inhit:
             out.append("【")
             inhit = True

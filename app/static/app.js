@@ -109,7 +109,8 @@ function fmtChars(n) {
   if (n >= 1e4) return (n / 1e4).toFixed(n >= 1e6 ? 0 : 1).replace(/\.0$/, '') + ' 萬字';
   return n + ' 字';
 }
-const segsHtml = segs => (segs || []).map(([t, k]) => k ? `<span class="h${k}">${esc(t)}</span>` : esc(t)).join('');
+const segsHtml = segs => (segs || []).map(([t, k, s, e]) => k
+  ? `<span class="h${k}"${s != null ? ` data-s="${s}" data-e="${e}"` : ''}>${esc(t)}</span>` : esc(t)).join('');
 const badgeText = it => (it.ext && it.ext.length <= 4 ? it.ext : (KIND_LABEL[it.kind] || '')).toUpperCase();
 const rootOf = id => S.roots.find(r => r.id === id);
 function relDir(it) {
@@ -1307,20 +1308,24 @@ function renderOrig(body) {
 
 // ===================================================================== 原件：逐頁圖片，可標註
 // 頁面圖和文字層的逐字位置都由後台現算（輔助進程用完即退，結果只在內存裡留最近幾頁）。
-// 這裡只載入視區上下一屏內的頁，離開後卸下圖片和標註，交還內存。
-// 標註：命中（黃底）、從全文定位過來的位置（紅框）、懸停處的文本塊（藍虛框，單擊跳到全文並選中這段）。
+// 只為視區上下各一屏內的頁建元素（幾千頁的書也只有十來個），離開即刪掉、交還內存；滾動條由一條等高的軌道撐出。
+// 標註：命中（黃底）、當前位置（紅框：從全文或檢索片段跳過來的那一處）。
 const PDFV_ZOOMS = [0.5, 0.67, 0.8, 1, 1.25, 1.5, 2, 2.5, 3];
 const SVGNS = 'http://www.w3.org/2000/svg';
 const CHEV_L = I.chev.replace('<svg', '<svg style="transform:rotate(180deg)"');
 let V = null;
 const useSystemPdf = pv => S.fullPdf.has(pv.id) || (S.pdfMode === 'system' && !isBigPdf(pv));
 function dropViewer() {
-  if (V) { if (V.io) V.io.disconnect(); V = null; }
+  if (!V) return;
+  if (V.ro) V.ro.disconnect();
+  for (const pg of V.live.values()) clearTimeout(pg.timer);
+  clearTimeout(V.sraf);
+  V = null;
 }
 function renderSystemPdf(body, start) {
   const pv = S.pv;
   body.innerHTML = `<div class="pgbar"><span class="pg-hint">系統 PDF 閱讀器${isBigPdf(pv) ? `（${fmtSize(pv.size)}，載入要幾秒）` : ''}：可選字，不能標註</span>
-    <span class="grow"></span><button class="btn mini" data-act="pg-pages" title="逐頁顯示：標出命中，懸停對照全文">逐頁（可標註）</button></div>
+    <span class="grow"></span><button class="btn mini" data-act="pg-pages" title="逐頁顯示：在原件上標出命中">逐頁（可標註）</button></div>
     <iframe class="frame" src="${rawUrl(pv.id, start ? '#page=' + start : '')}"></iframe>`;
 }
 // 全文（UTF-16 下標）的分頁
@@ -1348,10 +1353,10 @@ function annotSpans() {
 }
 function renderViewer(body, start) {
   const pv = S.pv, n = Math.max(1, pv.pages || 1);
-  V = { id: pv.id, n, zi: S.pdfZoom != null ? S.pdfZoom : 3, pages: [], io: null, cur: 1, marked: 0, unmarked: 0,
-    hasText: pv.status === 1 && pv.text != null && !pv.sparse, spans: annotSpans(), focus: null, hov: null,
-    moved: false, raf: 0, sraf: 0 };
-  if (S.pdfFocus && S.pdfFocus.id === pv.id) V.focus = S.pdfFocus;
+  V = { id: pv.id, n, zi: S.pdfZoom != null ? S.pdfZoom : 3, pa: 1.4142, paSet: false, aspects: {}, live: new Map(),
+    marksCache: new Map(), pad: 12, gap: 12, cur: 1, marked: 0, unmarked: 0, sraf: 0, ro: null,
+    hasText: pv.status === 1 && pv.text != null && !pv.sparse, spans: annotSpans(), focus: null, focused: false, moved: false };
+  if (S.pdfFocus && S.pdfFocus.id === pv.id) { V.focus = S.pdfFocus; S.pendingPos = null; }
   S.pdfFocus = null;
   body.innerHTML = `<div class="pgbar">
       <button class="icon-btn" data-act="pg-prev" title="上一頁（←）">${CHEV_L}</button>
@@ -1364,98 +1369,51 @@ function renderViewer(body, start) {
       <span class="pg-hint" id="pg-hint"></span>
       <span class="grow"></span>
       <button class="btn mini" data-act="pg-full" title="${isBigPdf(pv) ? `用系統 PDF 閱讀器顯示整本：這個 PDF 很大（${fmtSize(pv.size)}），要等幾秒、佔用較多內存` : '用系統 PDF 閱讀器顯示整本：可選字，但不能標註'}">系統閱讀器</button>
-    </div><div class="pdfv" id="pdfv" tabindex="0"></div>`;
-  const box = $('#pdfv', body);
-  V.box = box;
-  box.style.setProperty('--z', PDFV_ZOOMS[V.zi]);
+    </div><div class="pdfv" id="pdfv" tabindex="0"><div class="pdfv-track"></div></div>`;
+  V.box = $('#pdfv', body);
+  V.track = V.box.firstChild;
   $('#pg-zl', body).textContent = Math.round(PDFV_ZOOMS[V.zi] * 100) + '%';
-  const tpl = document.createElement('div');
-  tpl.className = 'pdfv-page';
-  tpl.innerHTML = '<span class="pdfv-num"></span><img alt="" draggable="false">';
-  const frag = document.createDocumentFragment();
-  for (let k = 1; k <= n; k++) {
-    const el = tpl.cloneNode(true);
-    el.dataset.n = k;
-    el.firstChild.textContent = k;
-    frag.appendChild(el);
-    const pg = { n: k, el, img: el.lastChild, w: 0, aspect: 0, marks: null, asked: false, timer: 0, svg: null, hovG: null, blocks: null };
-    pg.img.onload = () => { setAspect(pg, pg.img.naturalHeight / Math.max(1, pg.img.naturalWidth)); drawMarks(pg); };
-    pg.img.onerror = () => { if (pg.img.getAttribute('src')) { pg.w = 0; pg.el.classList.add('err'); } };
-    V.pages.push(pg);
-  }
-  box.appendChild(frag);
-  let p0 = start || (V.focus ? pageOfOffset(pv, V.focus.s) : 0) || S.pgLast[pv.id] || 1;
-  V.cur = Math.max(1, Math.min(n, p0));
+  layoutViewer();
+  const p0 = start || (V.focus ? pageOfOffset(pv, V.focus.s) : 0) || S.pgLast[pv.id] || 1;
+  V.box.scrollTop = pageTop(Math.max(1, Math.min(n, p0))) - 10;
   updHint();
-  bindViewer(box);
+  bindViewer(V.box);
+  syncPages();
   const v = V;
-  box.scrollTop = V.pages[V.cur - 1].el.offsetTop - 10;
-  updPage();
-  // 進入視區（上下各多一屏）停留片刻才載入：快速翻過的頁不請求；離開後卸下圖片和標註，交還內存
-  V.io = new IntersectionObserver(es => es.forEach(e => {
-    const pg = v.pages[+e.target.dataset.n - 1];
-    clearTimeout(pg.timer);
-    if (e.isIntersecting) pg.timer = setTimeout(() => loadPage(v, pg), 120);
-    else unloadPage(pg);
-  }), { root: box, rootMargin: '100% 0px' });
-  V.pages.forEach(pg => V.io.observe(pg.el));
+  V.ro = new ResizeObserver(() => { if (V === v && V.box.clientWidth) relayout(); });   // 拖動分隔條、縮放窗口
+  V.ro.observe(V.box);
 }
-function updHint() {
-  const el = $('#pg-hint');
-  if (!el || !V) return;
-  const pv = S.pv;
-  if (pv.sparse || pv.status !== 1) el.textContent = '掃描件：沒有可標註的文字層';
-  else if (V.marked) el.textContent = (V.spans.length ? '黃＝命中 · ' : '') + '懸停對照文字，單擊跳到全文';
-  else if (V.unmarked) el.textContent = '這幾頁的文字層沒有位置信息，無法標註';
-  else el.textContent = '';
+const pageTop = k => V.pad + (k - 1) * V.step;
+function layoutViewer() {
+  const inner = Math.max(200, V.box.clientWidth - 2 * V.pad);
+  V.pageW = Math.max(120, Math.round(inner * PDFV_ZOOMS[V.zi]));
+  V.slotH = Math.round(V.pageW * V.pa);
+  V.step = V.slotH + V.gap;
+  V.left = V.pad + Math.max(0, Math.round((inner - V.pageW) / 2));
+  V.track.style.height = (2 * V.pad + V.n * V.step - V.gap) + 'px';
+  V.track.style.width = (Math.max(inner, V.pageW) + 2 * V.pad) + 'px';
+  for (const pg of V.live.values()) placePage(pg);
 }
-function wantWidth() {
-  return Math.min(3200, Math.max(600, Math.ceil(V.box.clientWidth * PDFV_ZOOMS[V.zi] * (window.devicePixelRatio || 1) / 200) * 200));
+function placePage(pg) {
+  const s = pg.el.style;
+  s.top = pageTop(pg.n) + 'px'; s.left = V.left + 'px'; s.width = V.pageW + 'px'; s.height = V.slotH + 'px';
+  // 這一頁自己的高寬比（與首頁不同時在槽位內縮放、居中）
+  const a = pg.aspect || V.pa;
+  let w = V.pageW, h = w * a;
+  if (h > V.slotH) { h = V.slotH; w = h / a; }
+  const t = pg.inner.style;
+  t.width = w + 'px'; t.height = h + 'px'; t.left = (V.pageW - w) / 2 + 'px';
 }
-function loadPage(v, pg) {
-  if (V !== v) return;
-  const w = wantWidth();
-  if (pg.w < w) {
-    pg.w = w;
-    pg.el.classList.remove('err');
-    pg.img.src = `/page/${v.id}/${pg.n}?w=${w}&t=${encodeURIComponent(S.token)}`;
-  }
-  if (v.hasText && !pg.asked && pageHasText(S.pv, pg.n)) {
-    pg.asked = true;
-    api(`pageboxes?id=${v.id}&p=${pg.n}`).then(d => {
-      if (V !== v || !pg.asked) return;
-      pg.marks = { o0: d.o0, boxes: d.boxes.map(b => b && [b[0] / 1e4, b[1] / 1e4, b[2] / 1e4, b[3] / 1e4]) };
-      pg.blocks = null;
-      if (d.boxes.some(Boolean)) v.marked++; else v.unmarked++;
-      updHint();
-      drawMarks(pg);
-    }).catch(() => {});
-  }
-}
-function unloadPage(pg) {
-  if (pg.w) { pg.img.removeAttribute('src'); pg.w = 0; }
-  if (pg.svg) { pg.svg.remove(); pg.svg = null; pg.hovG = null; }
-  pg.marks = null; pg.blocks = null; pg.asked = false;
-}
-// 各頁高寬比：第一頁載入後作為其餘未載入頁的默認值；視區之上的頁變高變矮時，眼前的內容不動
-function setAspect(pg, a) {
-  if (!V || !a || Math.abs(a - pg.aspect) < 1e-3) return;
-  const restore = anchorView();
-  if (!V.box.style.getPropertyValue('--pa')) V.box.style.setProperty('--pa', a.toFixed(4));
-  pg.aspect = a;
-  pg.el.style.aspectRatio = '1 / ' + a.toFixed(4);
-  restore();
-}
-function anchorView() {
-  const pg = V.pages[viewPage() - 1], box = V.box;
-  const top = pg.el.offsetTop, frac = (box.scrollTop - top) / (pg.el.offsetHeight || 1);
-  return () => { box.scrollTop = pg.el.offsetTop + frac * pg.el.offsetHeight; };
+function relayout() {
+  if (!V) return;
+  const k = viewPage(), frac = (V.box.scrollTop - pageTop(k)) / V.step;
+  layoutViewer();
+  V.box.scrollTop = pageTop(k) + frac * V.step;
+  syncPages();
+  for (const pg of V.live.values()) if (pg.w && pg.w < wantWidth()) loadPage(V, pg);
 }
 function viewPage() {
-  const y = V.box.scrollTop + V.box.clientHeight * 0.35;
-  let lo = 0, hi = V.pages.length - 1;
-  while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (V.pages[mid].el.offsetTop <= y) lo = mid; else hi = mid - 1; }
-  return lo + 1;
+  return Math.min(V.n, Math.max(1, Math.floor((V.box.scrollTop + V.box.clientHeight * 0.35 - V.pad) / V.step) + 1));
 }
 function updPage() {
   if (!V) return;
@@ -1464,23 +1422,106 @@ function updPage() {
   const go = $('#pg-no');
   if (go && document.activeElement !== go) go.value = V.cur;
 }
+// 只保留視區上下各一屏內的頁；新進入的停留片刻才請求圖片（快速翻過的頁不請求）
+function syncPages() {
+  if (!V) return;
+  const top = V.box.scrollTop, h = V.box.clientHeight || 600;
+  const a = Math.max(1, Math.floor((top - h - V.pad) / V.step) + 1);
+  const b = Math.min(V.n, Math.floor((top + 2 * h - V.pad) / V.step) + 1);
+  for (const [k, pg] of V.live) {
+    if (k < a - 1 || k > b + 1) { clearTimeout(pg.timer); pg.el.remove(); V.live.delete(k); }
+  }
+  const v = V;
+  for (let k = a; k <= b; k++) {
+    if (V.live.has(k)) continue;
+    const el = document.createElement('div');
+    el.className = 'pdfv-page';
+    el.innerHTML = `<div class="pdfv-pg"><span class="pdfv-num">${k}</span><img alt="" draggable="false"></div>`;
+    const pg = { n: k, el, inner: el.firstChild, img: el.firstChild.lastChild, w: 0, aspect: V.aspects[k] || 0,
+      marks: null, asked: false, svg: null, timer: 0 };
+    pg.img.onload = () => setAspect(pg, pg.img.naturalHeight / Math.max(1, pg.img.naturalWidth));
+    pg.img.onerror = () => { if (pg.img.getAttribute('src')) { pg.w = 0; pg.inner.classList.add('err'); } };
+    placePage(pg);
+    V.track.appendChild(el);
+    V.live.set(k, pg);
+    pg.timer = setTimeout(() => loadPage(v, pg), 120);
+  }
+  updPage();
+}
+function updHint() {
+  const el = $('#pg-hint');
+  if (!el || !V) return;
+  const pv = S.pv;
+  if (pv.sparse || pv.status !== 1) el.textContent = '掃描件：沒有可標註的文字層';
+  else if (V.marked) el.textContent = (V.spans.length ? '黃＝命中 · ' : '') + '紅框＝當前位置';
+  else if (V.unmarked) el.textContent = '這幾頁的文字層沒有位置信息，無法標註';
+  else el.textContent = '';
+}
+function wantWidth() {
+  return Math.min(3200, Math.max(600, Math.ceil(V.pageW * (window.devicePixelRatio || 1) / 200) * 200));
+}
+function loadPage(v, pg) {
+  if (V !== v || V.live.get(pg.n) !== pg) return;
+  const w = wantWidth();
+  if (pg.w < w) {
+    pg.w = w;
+    pg.inner.classList.remove('err');
+    pg.img.src = `/page/${v.id}/${pg.n}?w=${w}&t=${encodeURIComponent(S.token)}`;
+  }
+  if (!v.hasText || pg.asked || !pageHasText(S.pv, pg.n)) return;
+  pg.asked = true;
+  const got = d => {
+    if (V !== v) return;
+    if (!v.marksCache.has(pg.n)) {
+      v.marksCache.set(pg.n, d);
+      if (v.marksCache.size > 40) v.marksCache.delete(v.marksCache.keys().next().value);   // 只記最近四十頁
+      if (d.boxes.some(Boolean)) v.marked++; else v.unmarked++;
+      updHint();
+    }
+    pg.marks = d;
+    drawMarks(pg);
+  };
+  const c = v.marksCache.get(pg.n);
+  if (c) return got(c);
+  api(`pageboxes?id=${v.id}&p=${pg.n}`).then(d => got({ o0: d.o0, boxes: d.boxes.map(b => b && [b[0] / 1e4, b[1] / 1e4, b[2] / 1e4, b[3] / 1e4]) }))
+    .catch(() => {});
+}
+// 第一頁載入後以它的高寬比作為各頁槽位的高寬比；眼前的內容不動
+function setAspect(pg, a) {
+  if (!V || !a) return;
+  V.aspects[pg.n] = pg.aspect = a;
+  if (!V.paSet) {
+    V.paSet = true;
+    if (Math.abs(a - V.pa) > 1e-3) { V.pa = a; relayout(); }
+  }
+  placePage(pg);
+  drawMarks(pg);
+}
 function toPage(n) {
   if (!V || n < 1 || n > V.n) return;
   V.moved = true;
-  V.box.scrollTop = V.pages[n - 1].el.offsetTop - 10;
-  updPage();
+  V.box.scrollTop = pageTop(n) - 10;
+  syncPages();
 }
 function vZoom(z) {
   if (!V) return;
   z = Math.max(0, Math.min(PDFV_ZOOMS.length - 1, z));
   if (z === V.zi) return;
-  const restore = anchorView(), box = V.box, cx = (box.scrollLeft + box.clientWidth / 2) / Math.max(1, box.scrollWidth);
+  const box = V.box, cx = (box.scrollLeft + box.clientWidth / 2) / Math.max(1, box.scrollWidth);
   V.zi = S.pdfZoom = z;
-  box.style.setProperty('--z', PDFV_ZOOMS[z]);
   $('#pg-zl').textContent = Math.round(PDFV_ZOOMS[z] * 100) + '%';
-  restore();
+  relayout();
   box.scrollLeft = cx * box.scrollWidth - box.clientWidth / 2;
-  for (let k = Math.max(1, V.cur - 2); k <= Math.min(V.n, V.cur + 2); k++) if (V.pages[k - 1].w) loadPage(V, V.pages[k - 1]);
+}
+// 跳到某處（檢索片段懸停、全文定位）：翻到那一頁，標註到了把它紅框標出、移到視區上部
+function focusOrig(s, e) {
+  if (!V) return;
+  V.focus = { id: V.id, s, e: e == null ? s : e };
+  V.focused = false;
+  V.moved = false;
+  V.box.scrollTop = pageTop(pageOfOffset(S.pv, s)) - 10;
+  syncPages();
+  for (const pg of V.live.values()) if (pg.marks) drawMarks(pg);
 }
 // 相鄰的逐字框合成行（橫排）或列（豎排）
 function mergeBoxes(list) {
@@ -1513,7 +1554,7 @@ function spanBoxes(pg, s, e) {
   for (let k = Math.max(s, o0), hi = Math.min(e, o0 + boxes.length); k < hi; k++) list.push(/\s/.test(t[k]) ? null : boxes[k - o0]);
   return mergeBoxes(list);
 }
-// 文本塊＝抽出文字裡的一行（豎排即一列）
+// 文本塊＝抽出文字裡的一行（豎排即一列）；右鍵「在全文中查看這段」用
 function pageBlocks(pg) {
   if (pg.blocks) return pg.blocks;
   const { o0, boxes } = pg.marks, t = S.pv.text, out = [];
@@ -1548,10 +1589,9 @@ function addRect(svg, H, b, cls, pad) {
   r.setAttribute('width', (b[2] * 1000 + 2 * pad).toFixed(1)); r.setAttribute('height', (b[3] * H + 2 * pad).toFixed(1));
   r.setAttribute('class', cls);
   svg.appendChild(r);
-  return r;
 }
 function drawMarks(pg) {
-  if (!V || !pg.marks || !pg.aspect) return;
+  if (!V || !pg.marks || !pg.aspect || V.live.get(pg.n) !== pg) return;
   if (pg.svg) pg.svg.remove();
   const { o0, boxes } = pg.marks, end = o0 + boxes.length, H = 1000 * pg.aspect;
   const svg = document.createElementNS(SVGNS, 'svg');
@@ -1571,37 +1611,22 @@ function drawMarks(pg) {
     }
     foc.forEach(b => addRect(svg, H, b, 'pm-focus', 3));
   }
-  pg.hovG = document.createElementNS(SVGNS, 'g');
-  pg.hovG.setAttribute('class', 'pm-hov');
-  svg.appendChild(pg.hovG);
   pg.svg = svg;
-  pg.el.appendChild(svg);
-  // 從全文定位過來：標註到了把那處移到視區上部（用戶已自己翻動則不動）
+  pg.inner.appendChild(svg);
   if (foc.length && !V.focused && !V.moved) {
     V.focused = true;
-    V.box.scrollTop = pg.el.offsetTop + foc[0][1] * pg.el.offsetHeight - V.box.clientHeight / 3;
-    updPage();
+    V.box.scrollTop = pageTop(pg.n) + foc[0][1] * pg.inner.offsetHeight - V.box.clientHeight / 3;
+    syncPages();
   }
 }
 function pagePoint(e) {
-  const el = e.target.closest && e.target.closest('.pdfv-page');
-  if (!el || !V) return null;
-  const pg = V.pages[+el.dataset.n - 1], r = el.getBoundingClientRect();
-  return { pg, nx: (e.clientX - r.left) / r.width, ny: (e.clientY - r.top) / r.height };
-}
-function setHover(pg, bl) {
-  const cur = V.hov;
-  if (cur && cur.pg === pg && cur.bl === bl) return;
-  if (cur && cur.pg.hovG) cur.pg.hovG.textContent = '';
-  if (cur) cur.pg.el.removeAttribute('title');
-  V.hov = bl ? { pg, bl } : null;
-  V.box.classList.toggle('over-text', !!bl);
-  if (bl && pg.hovG) {
-    const H = 1000 * pg.aspect;
-    bl.rects.forEach(b => addRect(pg.hovG, H, b, 'pm-hover', 2));
-    const txt = S.pv.text.slice(bl.a, bl.b).trim();
-    pg.el.title = (txt.length > 60 ? txt.slice(0, 60) + '…' : txt) + '\n單擊：在全文中查看這段';
-  }
+  const inner = e.target.closest && e.target.closest('.pdfv-pg');
+  if (!inner || !V) return null;
+  const k = +inner.parentNode.dataset.n || 0;
+  const pg = [...V.live.values()].find(p => p.inner === inner);
+  if (!pg) return null;
+  const r = inner.getBoundingClientRect();
+  return { pg, nx: (e.clientX - r.left) / r.width, ny: (e.clientY - r.top) / r.height, k };
 }
 function bindViewer(box) {
   const v = V;
@@ -1611,19 +1636,8 @@ function bindViewer(box) {
     else if (e.key === 'Escape') { go.value = v.cur; go.blur(); }
   });
   go.addEventListener('focus', () => go.select());
-  box.addEventListener('scroll', () => { if (!v.sraf) v.sraf = setTimeout(() => { v.sraf = 0; if (V === v) updPage(); }, 50); });
-  box.addEventListener('mousemove', e => {
-    if (v.drag) return;
-    v.mev = e;
-    if (!v.raf) v.raf = requestAnimationFrame(() => {
-      v.raf = 0;
-      if (V !== v || !v.mev) return;
-      const p = pagePoint(v.mev);
-      setHover(p && p.pg, p && v.hasText ? blockAt(p.pg, p.nx, p.ny) : null);
-    });
-  });
-  box.addEventListener('mouseleave', () => { v.mev = null; if (V === v) setHover(null, null); });
-  // 拖動平移；不移動的單擊＝跳到全文的這段
+  box.addEventListener('scroll', () => { if (!v.sraf) v.sraf = setTimeout(() => { v.sraf = 0; if (V === v) syncPages(); }, 50); });
+  // 拖動平移
   box.addEventListener('mousedown', e => {
     const r = box.getBoundingClientRect();
     if (e.button !== 0 || e.clientX - r.left > box.clientWidth || e.clientY - r.top > box.clientHeight) return;
@@ -1633,19 +1647,14 @@ function bindViewer(box) {
     let moved = false;
     const move = ev => {
       if (!moved && Math.abs(ev.clientX - sx) + Math.abs(ev.clientY - sy) < 4) return;
-      moved = v.moved = v.drag = true;
+      moved = v.moved = true;
       box.classList.add('grabbing');
       box.scrollLeft = sl - (ev.clientX - sx); box.scrollTop = st - (ev.clientY - sy);
     };
-    const up = ev => {
+    const up = () => {
       window.removeEventListener('mousemove', move);
       window.removeEventListener('mouseup', up);
       box.classList.remove('grabbing');
-      v.drag = false;
-      if (!moved && V === v) {
-        const p = pagePoint(ev), bl = p && v.hasText ? blockAt(p.pg, p.nx, p.ny) : null;
-        if (bl) gotoText(bl.a, bl.b);
-      }
     };
     window.addEventListener('mousemove', move);
     window.addEventListener('mouseup', up);
@@ -1703,6 +1712,39 @@ function showPagedPdf() {
   if (S.pdfMode !== 'pages') { S.pdfMode = 'pages'; api('settings', { pdf_view: 'pages' }).catch(() => {}); }
   renderPreviewBody();
 }
+
+// ---- 檢索片段懸停：預覽跳到那處命中（全文：跳到那處；原件：翻到那頁、紅框標出）
+// 正在預覽的文件幾乎立刻跳；別的文件要停留片刻才切換，免得鼠標劃過列表時接連載入
+let hoverTimer = 0, hoverKey = '';
+function revealHit(id, s, e) {
+  const pv = S.pv;
+  if (pv && !pv.folder && pv.id === id) {
+    if (S.pvTab === 'text' && $('#reader')) {
+      const k = !findActive() && S.spans ? S.spans.findIndex(sp => sp[1] > s) : -1;
+      if (k >= 0) return gotoHit(k);
+      return selectReaderRange(s, e);
+    }
+    if (S.pvTab === 'orig' && V && V.id === id) return focusOrig(s, e);
+    return;
+  }
+  S.pendingPos = s;
+  S.pdfFocus = { id, s, e };
+  selectItem(id);
+}
+$('#res-list').addEventListener('mouseover', e => {
+  const h = e.target.closest && e.target.closest('.snip [data-s]');
+  if (!h) return;
+  const it = h.closest('.item'), id = +it.dataset.id, s = +h.dataset.s, en = +h.dataset.e, key = id + ':' + s;
+  if (key === hoverKey) return;
+  hoverKey = key;
+  clearTimeout(hoverTimer);
+  const here = S.pv && !S.pv.folder && S.pv.id === id && S.sel.size <= 1;
+  hoverTimer = setTimeout(() => revealHit(id, s, en), here ? 120 : 550);
+});
+$('#res-list').addEventListener('mouseout', e => {
+  const h = e.target.closest && e.target.closest('.snip [data-s]');
+  if (h && !(e.relatedTarget && h.contains(e.relatedTarget))) { clearTimeout(hoverTimer); hoverKey = ''; }
+});
 
 // ---- 全文與原件互跳。全文裡的位置按 UTF-16 下標計，與後台換算後的命中位置一致
 function readerOffset(node, off) {
@@ -2274,8 +2316,8 @@ function showHelp() {
       在結果上右鍵 →「只在選中項中檢索」／「加入檢索範圍」—— 自選若干文件和文件夾；點結果上方的「範圍」標籤可查看、移除<br>
       預覽全文時按 ⌘F —— 只在當前文件內查找（與上方檢索框互不干擾，模糊開關也各自獨立）</p></div>
     <div class="field"><label>PDF 原件</label>
-      <p class="hint" style="margin:0">「原件」逐頁顯示，黃底標出命中；鼠標停在文字上會框出那一段，單擊跳到「全文」並選中它。<br>
-      反過來，在「全文」裡右鍵 →「在原件中查看此處」（或 ⌥ 單擊），原件上用紅框標出。需要選字時點「系統閱讀器」。<br>
+      <p class="hint" style="margin:0">「原件」逐頁顯示，黃底標出命中。檢索結果的片段裡，鼠標停在命中的詞上，右側預覽（全文或原件）就跳到那一處。<br>
+      在「全文」裡右鍵 →「在原件中查看此處」（或 ⌥ 單擊），原件上用紅框標出；原件上右鍵 →「在全文中查看這段」。需要選字時點「系統閱讀器」。<br>
       掃描件沒有文字層，無法標註。</p></div>
     <div class="field"><label>三種匹配方式</label>
       <p class="hint" style="margin:0">精確 —— 只匹配輸入的字形（不分大小寫、全半角）<br>
