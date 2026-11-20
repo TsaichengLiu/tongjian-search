@@ -465,8 +465,14 @@ mark, .h1, .h2 { color: inherit; border-radius: 2px; }
 .pdfv-pg.err .pdfv-num::after { content: "　此頁無法顯示"; font-size: 13px; font-weight: 400; }
 .pdfv-pg svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 /* 檢索片段裡的命中：懸停時右側預覽跳過去 */
-.snip [data-s] { cursor: default; }
-.snip [data-s]:hover { box-shadow: inset 0 -2px 0 var(--hl-cur); }
+/* 有作用的懸停：外面套一個小框（參照「對勘」） */
+.item.sel .snip .sh.hot, .reader.can-orig mark:hover {
+  box-shadow: 0 0 0 1.5px var(--accent), 0 0 0 4px var(--accent-soft-2); border-radius: 2px;
+}
+.reader.can-orig mark { cursor: pointer; }
+.pdfv.over-hit { cursor: pointer; }
+.pm-hov { fill: none; stroke: #b5402b; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.pm-hov-halo { fill: none; stroke: rgba(181, 64, 43, .22); stroke-width: 6; vector-effect: non-scaling-stroke; }
 .pm-hit { fill: rgba(240, 180, 67, .40); }
 .pm-focus { fill: rgba(181, 64, 43, .08); stroke: #b5402b; stroke-width: 2.2; vector-effect: non-scaling-stroke; }
 /* 查找框自己的模糊開關 */
