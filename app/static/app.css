@@ -217,17 +217,18 @@ svg .fill { fill: currentColor; stroke: none; }
 .dup-note { color: var(--text-3); margin-left: 2px; }
 .side-ic.saved-ic { color: #d99a1c; }
 /* 側欄「類型」：擴展名附標，可多選 */
-.ext-grid { display: flex; flex-wrap: wrap; gap: 4px 5px; padding: 2px 10px 6px 12px; }
-.ext-chip {
-  display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 7px 0 3px; border-radius: 7px;
-  border: 1px solid transparent; background: transparent; color: var(--text-3); font-size: 11px; font-variant-numeric: tabular-nums;
-}
-.ext-chip .badge { min-width: 0; height: 17px; padding: 0 5px; font-size: 9px; line-height: 17px; border-radius: 4px; text-transform: uppercase; }
-.ext-chip:hover { background: rgba(120, 100, 70, .08); color: var(--text-2); }
-.ext-chip.def::after { content: ""; width: 4px; height: 4px; border-radius: 2px; background: currentColor; opacity: .5; margin-left: -2px; }
-.ext-chip.on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-.ext-more { border: 0; background: none; color: var(--text-3); font-size: 11px; height: 24px; padding: 0 6px; }
-.ext-more:hover { color: var(--accent); }
+/* 側欄「類型」：每行一類，附標可單選 */
+.type-row { height: auto; min-height: 28px; padding-top: 3px; padding-bottom: 3px; white-space: normal; }
+.type-row .tbs { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 3px; }
+.tb { flex: none; border: 0; padding: 1px; background: none; border-radius: 5px; display: grid; }
+.tb .badge { min-width: 0; height: 17px; padding: 0 5px; font-size: 9px; line-height: 17px; border-radius: 4px; }
+.tb:hover .badge { filter: brightness(1.12); }
+/* 有選擇時，沒選中的附標變淡：一眼看出篩了哪些；什麼都不選時全部是彩色的＝全部類型 */
+.types.has-sel .tb:not(.on) .badge { background: transparent; color: var(--text-3); box-shadow: inset 0 0 0 1px var(--line-2); }
+.types.has-sel .tb.on { box-shadow: 0 0 0 1.5px var(--accent); }
+.type-row.active .tb.on { box-shadow: none; }
+.tb-more { flex: none; border: 0; background: none; color: var(--text-3); font-size: 10.5px; height: 19px; padding: 0 4px; border-radius: 4px; }
+.tb-more:hover { color: var(--accent); background: var(--accent-soft); }
 .side-link { border: 0; background: none; color: var(--text-3); font-size: 11px; margin-left: auto; padding: 0 4px; }
 .side-link:hover { color: var(--accent); }
 /* 合併的副本 */

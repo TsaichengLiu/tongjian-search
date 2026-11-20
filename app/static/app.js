@@ -32,7 +32,6 @@ const I = {
   search: '<svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 20 20"/></svg>',
   page: '<svg viewBox="0 0 24 24"><path d="M6.5 3.5h11a1.5 1.5 0 0 1 1.5 1.5v14a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 19V5a1.5 1.5 0 0 1 1.5-1.5z"/><path d="M8.5 8h7M8.5 11.5h7M8.5 15h4"/></svg>',
   ban: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="m6.5 6.5 11 11"/></svg>',
-  pin: '<svg viewBox="0 0 24 24"><path d="M9 4h6l-1 6 3.5 3.5h-11L10 10zM12 13.5V20"/></svg>',
   dots: '<svg viewBox="0 0 24 24"><circle class="fill" cx="6" cy="12" r="1.5"/><circle class="fill" cx="12" cy="12" r="1.5"/><circle class="fill" cx="18" cy="12" r="1.5"/></svg>',
 };
 
@@ -50,9 +49,9 @@ const S = {
   roots: [], tags: [], stats: {}, status: {}, settings: {}, meta: {}, tools: {},
   q: '', mode: 'full', scope: 'name', sort: 'relevance', limit: 200, projects: [],
   fuzzy: false, fzSim: '0.7', find: { open: false, q: '', res: null, busy: false, fz: false, sim: '0.7' },
-  filter: { root: null, dir: null, kind: null, tag: null, starred: false, only: null, exts: [] },
+  filter: { root: null, dir: null, kind: null, tag: null, starred: false, only: null, kinds: [], exts: [] },
   openDups: new Set(), searches: { history: [], saved: [] }, dupView: false, dupData: null, dupKeep: {}, dupCount: null,
-  extAll: false, defExts: [],
+  openKinds: new Set(),
   res: null, items: [], cur: null, sel: new Set(), anchor: null,
   pv: null, pvTab: 'text', pvTabPref: 'text', hit: 0, hitEls: [], pendingPos: null,
   dirs: {}, openRoots: new Set(), openDirs: new Set(),
@@ -314,7 +313,7 @@ function treeHtml(node, depth, rootId) {
 }
 function renderSidebar() {
   const f = S.filter, st = S.stats || {};
-  const noFilter = isHome() && !S.dupView;
+  const noFilter = !hasFilter() && !S.dupView;
   let h = `<div class="brand"><div class="seal">檢</div><div><div class="brand-name">通檢</div>
     <div class="brand-sub">簡繁異體 · 文件檢索</div></div></div><div class="side-scroll">`;
   h += `<div class="side-sec"><div class="side-h"><span>資料庫</span>
@@ -328,7 +327,7 @@ function renderSidebar() {
   }
   if (!S.roots.length) h += `<div class="side-item" data-act="add-root"><span class="side-ic">${I.plus}</span><span class="label" style="color:var(--text-3)">添加文件夾…</span></div>`;
   h += `</div><div class="side-sec"><div class="side-h"><span>瀏覽</span></div>
-    <div class="side-item${noFilter ? ' active' : ''}" data-act="all"${S.defExts.length ? ` title="默認類型：${esc(extList(S.defExts))}（可在「類型」右上的 ⋯ 或設置裡改）"` : ''}><span class="side-ic">${I.tray}</span><span class="label">全部文件</span><span class="count">${fmtNum(S.defExts.length ? defCount() : st.files)}</span></div>
+    <div class="side-item${noFilter ? ' active' : ''}" data-act="all"><span class="side-ic">${I.tray}</span><span class="label">全部文件</span><span class="count">${fmtNum(st.files)}</span></div>
     <div class="side-item${f.starred ? ' active' : ''}" data-act="starred"><span class="side-ic">${I.star}</span><span class="label">已收藏</span><span class="count">${fmtNum(st.starred)}</span></div>
     <div class="side-item${f.kind === 'notext' ? ' active' : ''}" data-act="kind" data-kind="notext" title="沒有文字層的 PDF（多為掃描件），只能檢索文件名"><span class="side-ic">${I.scan}</span><span class="label">無文字層</span><span class="count">${fmtNum(st.notext)}</span></div>
     <div class="side-item${S.dupView ? ' active' : ''}" data-act="dups" title="內容相同的文件：選留一份，其餘移到廢紙簍（會按側欄的類型、文件夾篩選縮小範圍）"><span class="side-ic">${I.copy}</span><span class="label">重複文件</span><span class="count">${S.dupCount != null ? fmtNum(S.dupCount) : ''}</span></div></div>`;
@@ -340,22 +339,7 @@ function renderSidebar() {
     }
     h += '</div>';
   }
-  const exts = st.exts || [], selx = new Set(f.exts || []), defx = new Set(S.defExts);
-  if (exts.length) {
-    const shown = S.extAll ? exts : exts.slice(0, 12);
-    const chip = (x, k, n, on) => `<button class="ext-chip${on ? ' on' : ''}${defx.has(x) ? ' def' : ''}" data-act="ext" data-ext="${esc(x)}" title="${x ? '.' + esc(x) : '沒有擴展名'}：${fmtNum(n)} 個文件（可多選${defx.has(x) ? '；默認類型' : ''}）">
-      <span class="badge k-${k}">${esc(x ? (x.length > 7 ? x.slice(0, 6) + '…' : x) : '—')}</span><span class="n">${fmtNum(n)}</span></button>`;
-    h += `<div class="side-sec"><div class="side-h"><span>類型</span>
-      ${selx.size ? `<button class="side-link" data-act="ext-clear" title="顯示全部類型">清除</button>` : ''}
-      <button class="icon-btn" data-act="ext-def" title="默認類型：${S.defExts.length ? esc(extList(S.defExts)) : '未設（顯示全部類型）'}">${I.dots}</button>
-      <button class="icon-btn" data-act="ext-add" title="輸入擴展名篩選（可多個，如 caj nh）">${I.plus}</button></div><div class="ext-grid">`;
-    for (const [x, k, n] of shown) h += chip(x, k, n, selx.has(x));
-    for (const x of new Set([...selx, ...defx])) if (!shown.some(e => e[0] === x)) {      // 選中的、默認的總在
-      const e = exts.find(e => e[0] === x); h += chip(x, e ? e[1] : 'other', e ? e[2] : 0, selx.has(x));
-    }
-    if (exts.length > 12) h += `<button class="ext-more" data-act="ext-more">${S.extAll ? '收起' : `全部 ${exts.length} 種`}</button>`;
-    h += '</div></div>';
-  }
+  h += typesHtml(f, st);
   h += `<div class="side-sec"><div class="side-h"><span>標籤</span>
     <button class="icon-btn" data-act="new-tag" title="新建標籤">${I.plus}</button></div>`;
   for (const t of S.tags) {
@@ -424,16 +408,21 @@ $('#sidebar').addEventListener('click', async e => {
   if (act === 'new-tag') return newTag();
   if (act === 'settings') return openSettings();
   if (act === 'rescan') { S.lastRescan = Date.now(); await api('rescan', {}); toast('正在重新掃描…'); return setTimeout(poll, 300); }
-  if (act === 'all') { S.dupView = false; return setFilter({ root: null, dir: null, kind: null, tag: null, starred: false, only: null, exts: S.defExts.slice() }); }
-  if (act === 'ext-def') { const r = el.getBoundingClientRect(); return extDefMenu(r.left, r.bottom + 4); }
+  if (act === 'all') { S.dupView = false; return setFilter({ root: null, dir: null, kind: null, tag: null, starred: false, only: null, kinds: [], exts: [] }); }
   if (act === 'dups') return S.dupView ? (S.dupView = false, renderSidebar(), runSearch()) : openDupView();
   if (act === 'saved') { const en = S.searches.saved.find(x => x.id === +el.dataset.id); return en && applySearch(en); }
-  if (act === 'ext') {
-    const x = el.dataset.ext, cur = S.filter.exts || [];
-    return setFilter({ exts: cur.includes(x) ? cur.filter(y => y !== x) : cur.concat([x]) });
+  if (act === 'kindrow') {                         // 點行：整類選上／取消（可與別的類、單個擴展名並用）
+    const k = el.dataset.kind, kinds = S.filter.kinds || [];
+    return setFilter({ kinds: kinds.includes(k) ? kinds.filter(y => y !== k) : kinds.concat([k]),
+                       exts: (S.filter.exts || []).filter(x => extKind(x) !== k) });
   }
-  if (act === 'ext-more') { S.extAll = !S.extAll; return renderSidebar(); }
-  if (act === 'ext-clear') return setFilter({ exts: [] });
+  if (act === 'ext') return toggleExt(el.dataset.ext);
+  if (act === 'kind-more') {
+    const k = el.dataset.kind;
+    S.openKinds.has(k) ? S.openKinds.delete(k) : S.openKinds.add(k);
+    return renderSidebar();
+  }
+  if (act === 'ext-clear') return setFilter({ kinds: [], exts: [] });
   if (act === 'ext-add') {
     const v = await promptDialog('按擴展名篩選', '輸入一個或幾個擴展名，用空格或逗號隔開，如：caj nh pdf。可與側欄裡點選的一起用。', '');
     if (!v) return;
@@ -453,8 +442,6 @@ $('#sidebar').addEventListener('click', async e => {
   if (act === 'tag') return setFilter({ tag: +el.dataset.id }, true);
 });
 $('#sidebar').addEventListener('contextmenu', e => {
-  const xc = e.target.closest('.ext-chip, .ext-grid, [data-act="ext-def"]');
-  if (xc) { e.preventDefault(); return extDefMenu(e.clientX, e.clientY, xc.classList.contains('ext-chip') ? xc.dataset.ext : null); }
   const el = e.target.closest('.side-item[data-act]');
   if (!el) return;
   const act = el.dataset.act;
@@ -567,6 +554,7 @@ function filterParams(p) {
   if (f.root) p.set('root', f.root);
   if (f.dir) p.set('dir', f.dir);
   if (f.kind) p.set('kind', f.kind);
+  if (f.kinds && f.kinds.length) p.set('kinds', f.kinds.join(','));
   if (f.exts && f.exts.length) p.set('exts', f.exts.map(x => x || '-').join(','));
   if (f.tag) p.set('tag', f.tag);
   if (f.starred) p.set('starred', 1);
@@ -656,12 +644,12 @@ function renderResHead() {
   if (f.dir) chips.push(['dir', f.dir.split('/').pop()]);
   if (S.dupView) chips.push(['dups', '查重']);
   if (f.kind) chips.push(['kind', f.kind === 'notext' ? '無文字層' : KIND_LABEL[f.kind]]);
-  if (f.exts && f.exts.length) chips.push(['exts', extList(f.exts, ' · ') + (S.defExts.length && sameExts(f.exts, S.defExts) ? '（默認）' : '')]);
+  if (hasTypes(f)) chips.push(['exts', typesLabel(f)]);
   if (f.tag) { const t = S.tags.find(t => t.id === f.tag); chips.push(['tag', '#' + (t ? t.name : '')]); }
   if (f.starred) chips.push(['starred', '已收藏']);
   if (f.only) chips.push(['only', '範圍：' + onlyLabel(f.only)]);
   h += chips.map(([k, l]) => `<span class="fchip"${k === 'only' ? ' data-only title="只在這些文件／文件夾中檢索（點擊查看）"' : ''}><span>${esc(l)}</span><button data-clear="${k}" title="${k === 'dups' ? '退出查重' : '取消篩選'}">${I.x}</button></span>`).join('');
-  if (!S.dupView && (S.q.trim() || !isHome())) {
+  if (!S.dupView && (S.q.trim() || hasFilter())) {
     const sv = S.searches.saved.find(isCurrentSearch);
     h += `<button class="icon-btn save-q${sv ? ' on' : ''}" data-save title="${sv ? `已保存為「${esc(sv.name)}」` : '保存這個檢索（連同匹配方式、模糊、範圍和篩選）'}">${sv ? I.starFill : I.star}</button>`;
   }
@@ -680,7 +668,7 @@ $('#res-head').addEventListener('click', e => {
   if (!b) return;
   const k = b.dataset.clear;
   if (k === 'dups') { S.dupView = false; renderSidebar(); return runSearch(); }
-  if (k === 'exts') return setFilter({ exts: [] });
+  if (k === 'exts') return setFilter({ kinds: [], exts: [] });
   if (k === 'root') setFilter({ root: null, dir: null });
   else if (k === 'dir') setFilter({ dir: null });
   else setFilter({ [k]: k === 'starred' ? false : null });
@@ -2452,39 +2440,72 @@ $('#help-btn').onclick = showHelp;
 // 歷史：檢索停留三秒、按回車或打開了結果才記（打字途中的半截詞不記），存在本機資料庫裡，最多 60 條。
 // 保存的檢索：連同匹配方式、模糊、範圍和篩選一起存，在側欄或檢索框的下拉裡一點即重跑。
 const CLOCK = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.2"/><path d="M12 7.4V12l3.1 2"/></svg>';
-const DEFAULT_FILTER = () => ({ root: null, dir: null, kind: null, tag: null, starred: false, only: null, exts: [] });
-const hasFilter = (f = S.filter) => !!(f.root || f.dir || f.kind || f.tag || f.starred || f.only || (f.exts && f.exts.length));
-// ---- 默認類型：每次打開時自動選中，「全部文件」也回到它們
-const parseExts = s => (s || '').split(',').map(x => x.trim()).filter(Boolean).map(x => x === '-' ? '' : x);
-const extList = (a, sep = '、') => a.map(x => x ? x.toUpperCase() : '無擴展名').join(sep);
-const sameExts = (a, b) => a.length === b.length && a.every(x => b.includes(x));
-const isHome = (f = S.filter) => !(f.root || f.dir || f.kind || f.tag || f.starred || f.only) && sameExts(f.exts || [], S.defExts);
-const defCount = () => (S.stats && S.stats.exts || []).reduce((n, e) => n + (S.defExts.includes(e[0]) ? e[2] : 0), 0);
-async function setDefExts(list, apply = true) {
-  const old = S.defExts;
-  S.defExts = list.slice();
-  S.settings.default_exts = list.map(x => x || '-').join(',');
-  try { await api('settings', { default_exts: S.settings.default_exts }); } catch (err) { return fail(err); }
-  // 正在看的是原來的默認類型（或要求套用）：換成新的
-  if (apply || sameExts(S.filter.exts || [], old)) setFilter({ exts: S.defExts.slice() });
-  else renderSidebar();
+const DEFAULT_FILTER = () => ({ root: null, dir: null, kind: null, tag: null, starred: false, only: null, kinds: [], exts: [] });
+const hasTypes = (f = S.filter) => !!((f.kinds && f.kinds.length) || (f.exts && f.exts.length));
+const hasFilter = (f = S.filter) => !!(f.root || f.dir || f.kind || f.tag || f.starred || f.only || hasTypes(f));
+// ===================================================================== 側欄「類型」
+// 與原來一樣按大類分行、什麼都不選＝全部類型；每行用擴展名附標代替文字。
+// 點行＝整類（kinds），點附標＝單個擴展名（exts），兩者取並集，都可多選。
+const KIND_ROW_MAX = 3;                                    // 每行先列文件最多的三種，其餘「+N」展開
+const extKind = x => { const e = ((S.stats && S.stats.exts) || []).find(e => e[0] === x); return e ? e[1] : null; };
+const kindExts = k => ((S.stats && S.stats.exts) || []).filter(e => e[1] === k).map(e => e[0]);
+const extLabel = x => x ? x.toUpperCase() : '無擴展名';
+function typesLabel(f = S.filter, sep = ' · ') {
+  const out = [];
+  for (const k of KIND_ORDER) if ((f.kinds || []).includes(k)) {
+    const xs = kindExts(k);
+    out.push(xs.length <= 1 ? extLabel(xs[0] || k) : xs.slice(0, 2).map(extLabel).join('、') + ' 等');
+  }
+  for (const x of f.exts || []) out.push(extLabel(x));
+  return out.join(sep);
 }
-function extDefMenu(x, y, ext) {
-  const sel = S.filter.exts || [], def = S.defExts, items = [];
-  items.push({ header: def.length ? '默認類型：' + extList(def) : '默認類型：未設（顯示全部類型）' });
-  if (ext != null && !(sel.length === 1 && sel[0] === ext))
-    items.push({ label: `只看 ${extList([ext])}`, icon: 'search', act: () => setFilter({ exts: [ext] }) });
-  if (ext != null && !def.includes(ext))
-    items.push({ label: `把 ${extList([ext])} 加入默認類型`, icon: 'pin', act: () => setDefExts(def.concat([ext]), false) });
-  if (ext != null && def.includes(ext))
-    items.push({ label: `從默認類型中去掉 ${extList([ext])}`, icon: 'x', act: () => setDefExts(def.filter(y => y !== ext), false) });
-  if (sel.length && !sameExts(sel, def))
-    items.push({ label: `把當前選中的設為默認（${extList(sel)}）`, icon: 'pin', act: async () => { await setDefExts(sel); toast('以後每次打開都會先選中 ' + extList(sel)); } });
-  if (def.length && !sameExts(sel, def)) items.push({ label: '回到默認類型', icon: 'refresh', act: () => setFilter({ exts: def.slice() }) });
-  if (def.length) items.push({ sep: true }, { label: '不設默認類型（打開時顯示全部）', icon: 'x', act: () => setDefExts([], false) });
-  if (items.length === 1) items.push({ label: '先在下面點選幾種類型，再設為默認', disabled: true });
-  showMenu(x, y, items);
+function toggleExt(x) {
+  const f = S.filter, k = extKind(x);
+  let kinds = (f.kinds || []).slice(), exts = (f.exts || []).slice();
+  if (k && kinds.includes(k)) {                            // 整類已選：點其中一種＝只去掉這一種
+    kinds = kinds.filter(y => y !== k);
+    exts = exts.concat(kindExts(k).filter(y => y !== x));
+  } else if (exts.includes(x)) exts = exts.filter(y => y !== x);
+  else {
+    exts.push(x);
+    const all = k && kindExts(k);
+    if (all && all.every(y => exts.includes(y))) {         // 一類裡的都點齊了：合成整類
+      exts = exts.filter(y => extKind(y) !== k);
+      kinds.push(k);
+    }
+  }
+  setFilter({ kinds, exts });
 }
+function typesHtml(f, st) {
+  const exts = st.exts || [];
+  if (!exts.length) return '';
+  const byKind = {};
+  for (const [x, k, n] of exts) (byKind[k] = byKind[k] || []).push([x, n]);
+  const kinds = f.kinds || [], selx = f.exts || [], any = kinds.length || selx.length;
+  const badge = (x, k, n, on) => `<button class="tb${on ? ' on' : ''}" data-act="ext" data-ext="${esc(x)}" title="${x ? '.' + esc(x) : '沒有擴展名'}：${fmtNum(n)} 個文件">` +
+    `<span class="badge k-${k}">${esc(x ? (x.length > 6 ? x.slice(0, 5) + '…' : x) : '—')}</span></button>`;
+  let h = `<div class="side-sec types${any ? ' has-sel' : ''}"><div class="side-h"><span>類型</span>
+    ${any ? `<button class="side-link" data-act="ext-clear" title="回到全部類型">清除</button>` : ''}
+    <button class="icon-btn" data-act="ext-add" title="輸入擴展名篩選（可多個，如 caj nh）">${I.plus}</button></div>`;
+  for (const k of KIND_ORDER) {
+    const list = byKind[k];
+    if (!list) continue;
+    const kOn = kinds.includes(k), open = S.openKinds.has(k);
+    const shown = open ? list : list.slice(0, KIND_ROW_MAX).concat(list.slice(KIND_ROW_MAX).filter(e => selx.includes(e[0])));
+    const more = list.length - shown.length;
+    const total = list.reduce((s, e) => s + e[1], 0);
+    h += `<div class="side-item type-row${kOn ? ' active' : ''}${open ? ' open' : ''}" data-act="kindrow" data-kind="${k}"
+      title="${kOn ? '點擊取消' : '點擊選這一類，可多選'}：${esc(list.map(e => extLabel(e[0])).join(' '))}">
+      <span class="tbs">${shown.map(([x, n]) => badge(x, k, n, kOn || selx.includes(x))).join('')}${more > 0 ?
+        `<button class="tb-more" data-act="kind-more" data-kind="${k}" title="展開其餘 ${more} 種">+${more}</button>` :
+        open && list.length > KIND_ROW_MAX ? `<button class="tb-more" data-act="kind-more" data-kind="${k}" title="收起">−</button>` : ''}</span>
+      <span class="count">${fmtNum(total)}</span></div>`;
+  }
+  const extra = selx.filter(x => !exts.some(e => e[0] === x));     // 輸入的、資料庫裡還沒有的擴展名
+  if (extra.length) h += `<div class="side-item type-row"><span class="tbs">${extra.map(x => badge(x, 'other', 0, true)).join('')}</span><span class="count">0</span></div>`;
+  return h + '</div>';
+}
+
 function canon(v) {
   if (Array.isArray(v)) return '[' + v.map(canon).join(',') + ']';
   if (v && typeof v === 'object') return '{' + Object.keys(v).sort().map(k => JSON.stringify(k) + ':' + canon(v[k])).join(',') + '}';
@@ -2494,6 +2515,7 @@ function currentParams() {
   const f = S.filter, flt = {};
   for (const k of ['root', 'dir', 'kind', 'tag']) if (f[k]) flt[k] = f[k];
   if (f.starred) flt.starred = true;
+  if (f.kinds && f.kinds.length) flt.kinds = f.kinds.slice();
   if (f.exts && f.exts.length) flt.exts = f.exts.slice();
   if (f.only) flt.only = f.only;
   const p = { mode: S.mode, scope: S.scope };
@@ -2510,7 +2532,7 @@ function searchSummary(e) {
   out.push(MODE_LABEL[p.mode] || '異體');
   if (p.fuzzy) out.push('模糊 ≥ ' + Math.round(p.fuzzy * 100) + '%');
   out.push(SCOPE_SHORT[p.scope] || '');
-  if (f.exts && f.exts.length) out.push(f.exts.map(x => x ? x.toUpperCase() : '無擴展名').join(' '));
+  if (hasTypes(f)) out.push(typesLabel(f, ' '));
   if (f.kind === 'notext') out.push('無文字層');
   if (f.dir) out.push(f.dir.split('/').pop());
   else if (f.root) { const r = rootOf(f.root); if (r) out.push(r.name); }
@@ -2684,7 +2706,7 @@ async function loadDups() {
     S.loading = false;
     renderResults();
     if (S.cur && (!S.pv || S.pv.id !== S.cur)) loadPreview(S.cur);
-    if (isHome()) S.dupCount = r.count;                // 側欄的數字只記沒有其他篩選（默認類型）時的組數
+    if (!hasFilter()) S.dupCount = r.count;            // 側欄的數字只記不加篩選時的總組數
     renderSidebar();
   } catch (err) { S.loading = false; renderResults(); fail(err); }
 }
@@ -2767,7 +2789,7 @@ function showHelp() {
       預覽全文時按 ⌘F —— 只在當前文件內查找（與上方檢索框互不干擾，模糊開關也各自獨立）</p></div>
     <div class="field"><label>檢索歷史與保存的檢索</label>
       <p class="hint" style="margin:0">點空的檢索框、點框裡的時鐘圖標或按 ↓，列出保存的檢索和最近的檢索（連同匹配方式、模糊、範圍和篩選），↑↓ 選、回車重跑。<br>
-      結果上方的 ☆ 把當前檢索保存到側欄。側欄「類型」按擴展名篩選，可多選，「＋」可輸入任意擴展名；右上的 ⋯（或右鍵）可把常用的設為默認類型，每次打開自動選中。</p></div>
+      結果上方的 ☆ 把當前檢索保存到側欄。側欄「類型」每行一類：點行選整類，點附標只選這一種擴展名，可多選，「＋」可輸入任意擴展名；什麼都不選就是全部類型。</p></div>
     <div class="field"><label>重複文件</label>
       <p class="hint" style="margin:0">檢索結果裡內容相同的文件合成一條，點「另有 N 個副本」展開。側欄「重複文件」列出全部重複的組，選留一份，其餘移到廢紙簍（移動前逐字節核對）。</p></div>
     <div class="field"><label>PDF 原件</label>
@@ -2806,9 +2828,6 @@ async function resetSettings() {
     const res = await api('settings/reset', { variants: !!(v && v.checked), excludes: !!(x && x.checked) });
     const s2 = await api('state');
     S.settings = s2.settings; S.projects = s2.projects || []; S.customGroups = s2.custom_groups; S.defaults = s2.defaults;
-    const oldDef = S.defExts;
-    S.defExts = parseExts(s2.settings.default_exts);
-    if (sameExts(S.filter.exts || [], oldDef)) S.filter.exts = S.defExts.slice();
     S.mode = s2.settings.mode || 'full';
     S.scope = s2.settings.scope || 'name';
     S.sort = s2.settings.sort || 'relevance';
@@ -2852,9 +2871,6 @@ async function openSettings() {
       ${S.projects.length ? `<div class="proj-list">${S.projects.map(p => `<div title="${esc(p)}">${esc(p.replace(/^\/Users\/[^/]+/, '~'))}</div>`).join('')}</div>` : ''}</div>
       <div class="field"><label class="switch"><input type="checkbox" id="st-code" ${st.code_fulltext === '1' ? 'checked' : ''}>代碼與配置文件也收全文</label>
       <p class="hint" style="margin:4px 0 0 44px">json、yaml、py、js、css、sql 等默認只收文件名，免得輸入法詞庫、腳本、導出數據淹沒檢索結果。</p></div>
-      <div class="field"><label>默認類型</label>
-      <p class="hint">每次打開通檢時自動選中這些類型，點「全部文件」也回到它們；用空格隔開，如 <code>pdf docx caj</code>。留空則默認顯示全部類型。也可以在側欄「類型」右上的 ⋯ 裡把當前選中的設為默認。</p>
-      <input type="text" id="st-defext" value="${esc(S.defExts.map(x => x || '-').join(' '))}" placeholder="留空：顯示全部類型" spellcheck="false"></div>
       <div class="field"><label class="switch"><input type="checkbox" id="st-merge" ${st.merge_dups !== '0' ? 'checked' : ''}>合併內容相同的文件</label>
       <p class="hint" style="margin:4px 0 0 44px">檢索結果裡文字相同（或逐字節相同）的文件合成一條，點「另有 N 個副本」展開。</p></div>
       <div class="field"><label class="switch"><input type="checkbox" id="st-hist" ${st.history_on !== '0' ? 'checked' : ''}>記錄檢索歷史</label>
@@ -2885,22 +2901,12 @@ async function openSettings() {
     code_fulltext: $('#st-code', el).checked ? '1' : '0',
     merge_dups: $('#st-merge', el).checked ? '1' : '0', history_on: $('#st-hist', el).checked ? '1' : '0',
   };
-  const newDef = Array.from(new Set($('#st-defext', el).value.split(/[\s,，、;；]+/)
-    .map(x => x.trim().replace(/^\.+/, '').toLowerCase()).filter(Boolean))).map(x => x === '-' ? '' : x);
   try {
     const res = await api('settings', patch);
     const renorm = patch.custom_variants !== st.custom_variants;
     Object.assign(S.settings, patch);
     S.customGroups = res.custom_groups;
     S.projects = res.projects || S.projects;
-    if (!sameExts(newDef, S.defExts)) {
-      const old = S.defExts;
-      S.defExts = newDef;
-      S.settings.default_exts = newDef.map(x => x || '-').join(',');
-      api('settings', { default_exts: S.settings.default_exts }).catch(fail);
-      if (sameExts(S.filter.exts || [], old)) S.filter.exts = newDef.slice();
-      renderSidebar();
-    }
     toast(renorm ? '字表已更新，正在重建索引…' : '已保存');
     setTimeout(poll, 300);
     runSearch({ keepScroll: true, reloadPreview: true });
@@ -3113,8 +3119,6 @@ async function init() {
     S.roots = st.roots; S.tags = st.tags; S.stats = st.stats; S.status = st.status;
     try { S.searches = await api('searches'); } catch (err) { /* 舊數據庫 */ }
     S.settings = st.settings; S.meta = st.variant_meta; S.tools = st.tools; S.db = st.db;
-    S.defExts = parseExts(st.settings.default_exts);
-    S.filter.exts = S.defExts.slice();
     S.tagColors = st.tag_colors; S.customGroups = st.custom_groups; S.defaults = st.defaults;
     S.mode = ['exact', 'st', 'full'].includes(st.settings.mode) ? st.settings.mode : 'full';
     S.scope = st.settings.scope || 'name';

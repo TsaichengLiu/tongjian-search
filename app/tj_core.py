@@ -69,7 +69,6 @@ DEFAULT_SETTINGS = {
     "pdf_view": "pages",
     "history_on": "1",
     "merge_dups": "1",
-    "default_exts": "",          # 每次打開時自動選中的類型（擴展名，逗號分隔，「-」= 無擴展名）
 }
 # 含這些文件的文件夾視為代碼項目，整個跳過
 PROJECT_MARKERS = {"package.json", "pyproject.toml", "setup.py", "requirements.txt", "Cargo.toml",
@@ -1235,11 +1234,19 @@ class Library(object):
             d = p["dir"].rstrip("/")
             where.append("(f.dir=? OR (f.dir>=? AND f.dir<?))")
             args += [d, d + "/", d + "0"]
+        # 類型：整類（kinds）與單個擴展名（exts）取並集
         exts = [x.strip().lstrip(".").lower() for x in (p.get("exts") or "").split(",")]
-        exts = [("" if x == "-" else x) for x in exts if x][:60]
+        exts = [("" if x == "-" else x) for x in exts if x][:120]
+        kinds = [k for k in (p.get("kinds") or "").split(",") if k.isalpha()][:20]
+        ors = []
+        if kinds:
+            ors.append("f.kind IN (%s)" % ",".join("?" * len(kinds)))
+            args += kinds
         if exts:
-            where.append("f.ext IN (%s)" % ",".join("?" * len(exts)))
+            ors.append("f.ext IN (%s)" % ",".join("?" * len(exts)))
             args += exts
+        if ors:
+            where.append("(" + " OR ".join(ors) + ")")
         k = p.get("kind")
         if k == "notext":
             where.append(NEAR_EMPTY_SQL + " AND f.kind='pdf'")
@@ -1461,7 +1468,8 @@ class Library(object):
                         it["sim"] = round(info["sim"], 3)
                     found[r["id"]] = it
         # ---- 文件夾名
-        if scope in ("all", "name") and not p.get("kind") and not p.get("exts") and not p.get("tag") and \
+        if scope in ("all", "name") and not p.get("kind") and not p.get("kinds") and not p.get("exts") and \
+                not p.get("tag") and \
                 p.get("starred") not in ("1", 1, True, "true"):
             for it in self._match_folders(c, p, Q, dcand):
                 found[it["id"]] = it
@@ -1646,8 +1654,7 @@ class Library(object):
     # 「恢復默認設置」會重置的項；自定義異體字與排除列表另行勾選
     RESETTABLE = ("cross_punct", "rescan_minutes", "watch", "skip_projects", "code_fulltext", "mode", "scope",
                   "sort", "collation", "sidebar_w", "list_w", "folder_view", "fuzzy", "fuzzy_sim",
-                  "reader_size", "find_fuzzy", "find_sim", "pdf_view", "history_on", "merge_dups",
-                  "default_exts")
+                  "reader_size", "find_fuzzy", "find_sim", "pdf_view", "history_on", "merge_dups")
 
     def reset_settings(self, variants=False, excludes=False):
         keys = list(self.RESETTABLE) + (["custom_variants"] if variants else []) + (["excludes"] if excludes else [])
