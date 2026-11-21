@@ -4,15 +4,26 @@
 
 *A local file search and management tool for macOS in which Simplified, Traditional and variant Chinese characters match each other (e.g. 万历 finds 萬曆, 萬歷, 万暦), for file names and full text.*
 
-## 安裝
+## 下載安裝
+
+到 [Releases](https://github.com/TsaichengLiu/tongjian-search/releases/latest) 下載 `TongJian-<版本>.dmg`（約 20 MB），打開後把「通檢」拖到「應用程式」。支持 Apple 芯片和 Intel 的 Mac，macOS 12 及以上；自帶 Python，不用另裝任何東西。
+
+**第一次打開**：這個 App 沒有 Apple 開發者簽名，第一次雙擊時 macOS 會提示無法驗證、不讓打開。點「完成」關掉提示，打開「系統設置 › 隱私與安全性」，往下找到關於「通檢」的提示，點「仍要打開」並確認（可能要輸入登錄密碼）；之後就和普通 App 一樣雙擊打開。macOS 14 及更早也可以按住 control 點按「通檢」，選「打開」。請從「應用程式」裡打開，不要直接在磁盤映像裡運行。
+
+索引和設置存在 `~/Library/Application Support/TongJian/`，縮略圖緩存在 `~/Library/Caches/TongJian/`；刪掉 App 和這兩個文件夾即完全卸載。
+
+### 從源碼構建
 
 需要 macOS 12 以上和 Xcode 命令行工具（提供 `python3` 與 `swiftc`；沒有的話在終端運行 `xcode-select --install`）。不依賴任何第三方庫。
 
 ```bash
 git clone https://github.com/TsaichengLiu/tongjian-search.git
 cd tongjian-search
-./build_app.sh --install      # 構建並安裝到「應用程序」；不加 --install 則只生成 build/通檢.app
+./build_app.sh --install      # 構建並安裝到「應用程序」（用系統的 python3）；不加 --install 則只生成 build/通檢.app
+tools/make_dist.sh            # 打包給別人下載的 build/dist/TongJian-<版本>.dmg：通用二進制、自帶 Python
 ```
+
+`tools/make_dist.sh` 會下載 [python-build-standalone](https://github.com/astral-sh/python-build-standalone) 的 CPython（Apple 芯片、Intel 各一份，按固定版本和 SHA-256 校驗），合併成一份通用的，去掉 pip、Tk、IDLE 等用不到的部分（約 45 MB）。
 
 ## 使用
 
@@ -44,6 +55,9 @@ cd tongjian-search
 `app/tj_mcp.py` 是一個 MCP 服務（stdio），讓 Claude Code 等 LLM 客戶端直接用通檢的索引查資料：簡繁異體互通、可模糊、命中帶頁碼，返回片段而不是整篇，省 token。
 
 ```bash
+# 從 Releases 下載的版本（自帶 Python）
+claude mcp add --scope user tongjian -- /Applications/通檢.app/Contents/Resources/python/bin/python3 -B -s /Applications/通檢.app/Contents/Resources/app/tj_mcp.py
+# 自己用 build_app.sh 構建的版本
 claude mcp add --scope user tongjian -- /usr/bin/python3 -B /Applications/通檢.app/Contents/Resources/app/tj_mcp.py
 ```
 

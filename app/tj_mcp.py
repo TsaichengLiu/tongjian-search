@@ -681,7 +681,8 @@ def main():
     # 與後台服務相同：讓分配器及時歸還已釋放的大塊內存
     if sys.platform == "darwin" and os.environ.get("MallocSpaceEfficient") != "1":
         env = dict(os.environ, MallocSpaceEfficient="1")
-        os.execve(sys.executable, [sys.executable, "-B", os.path.abspath(__file__)] + sys.argv[1:], env)
+        flags = ["-B"] + (["-s"] if sys.flags.no_user_site else [])
+        os.execve(sys.executable, [sys.executable] + flags + [os.path.abspath(__file__)] + sys.argv[1:], env)
     db = os.environ.get("TONGJIAN_DB") or os.path.join(
         os.path.expanduser("~/Library/Application Support/TongJian"), "library.db")
     if "--db" in sys.argv[1:-1]:

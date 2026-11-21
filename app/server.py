@@ -30,7 +30,9 @@ mimetypes.add_type("text/plain", ".md")
 
 
 def default_db():
-    return os.path.join(os.path.expanduser("~/Library/Application Support/TongJian"), "library.db")
+    # TONGJIAN_DB：測試時讓 App 用另一份資料庫
+    return os.environ.get("TONGJIAN_DB") or os.path.join(os.path.expanduser("~/Library/Application Support/TongJian"),
+                                                         "library.db")
 
 
 class App(object):
@@ -420,7 +422,7 @@ def main():
     # 以省空間模式重新啟動自己，常駐內存可降到 30–50 MB，速度不變
     if sys.platform == "darwin" and os.environ.get("MallocSpaceEfficient") != "1":
         env = dict(os.environ, MallocSpaceEfficient="1")
-        flags = ["-B"] if sys.dont_write_bytecode else []
+        flags = (["-B"] if sys.dont_write_bytecode else []) + (["-s"] if sys.flags.no_user_site else [])
         os.execve(sys.executable, [sys.executable] + flags + [os.path.abspath(__file__)] + sys.argv[1:], env)
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=5917)

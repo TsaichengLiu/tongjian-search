@@ -30,9 +30,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     func applicationDidFinishLaunching(_ n: Notification) {
         removeWebKitLeftovers()
+        if Bundle.main.bundlePath.contains("/AppTranslocation/") {
+            // 從磁盤映像或「下載」裡直接打開的：macOS 讓它在只讀的臨時位置運行，包內的輔助程序可能被攔
+            return fatal("請先把「通檢」拖到「應用程式」文件夾，再從那裡打開。", log: false)
+        }
+        clearQuarantine()
         buildMenu()
         buildWindow()
         startServer()
+    }
+
+    /// 從網上下載的 App 裡每個文件都帶「隔離」標記。用戶在「隱私與安全性」裡同意打開 App 之後，
+    /// App 自己啟動的輔助程序（自帶的 Python、tjhelper）仍可能因這個標記再被攔一次——由 App 替自己的包去掉。
+    func clearQuarantine() {
+        let res = Bundle.main.resourceURL!
+        let helper = res.appendingPathComponent("bin/tjhelper").path
+        guard getxattr(helper, "com.apple.quarantine", nil, 0, 0, XATTR_NOFOLLOW) >= 0 else { return }   // 沒有標記
+        var paths = [helper]
+        let py = res.appendingPathComponent("python")
+        if let en = FileManager.default.enumerator(atPath: py.path) {
+            for case let rel as String in en { paths.append(py.appendingPathComponent(rel).path) }
+        }
+        for p in paths { removexattr(p, "com.apple.quarantine", XATTR_NOFOLLOW) }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool { true }
@@ -84,10 +103,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
 
     // MARK: 後台服務
-    func findPython() -> String? {
+    /// 發佈版自帶 Python（Resources/python）；自己構建的版本用系統的
+    func findPython() -> (path: String, flags: [String])? {
+        let bundled = Bundle.main.resourceURL!.appendingPathComponent("python/bin/python3").path
+        if FileManager.default.isExecutableFile(atPath: bundled) { return (bundled, ["-s"]) }   // -s：不載入用戶自己裝的包
         for p in ["/usr/bin/python3", "/opt/homebrew/bin/python3", "/usr/local/bin/python3",
                   "/opt/anaconda3/bin/python3"] where FileManager.default.isExecutableFile(atPath: p) {
-            return p
+            return (p, [])
         }
         return nil
     }
@@ -98,8 +120,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         }
         let res = Bundle.main.resourceURL!
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: py)
-        p.arguments = ["-B", res.appendingPathComponent("app/server.py").path,
+        p.executableURL = URL(fileURLWithPath: py.path)
+        p.arguments = ["-B"] + py.flags + [res.appendingPathComponent("app/server.py").path,
                        "--port", "5917", "--native", "--token", token,
                        "--helper", res.appendingPathComponent("bin/tjhelper").path]
         var env = ProcessInfo.processInfo.environment
@@ -156,13 +178,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         }
     }
 
-    func fatal(_ msg: String) {
+    func fatal(_ msg: String, log: Bool = true) {
         let a = NSAlert()
         a.messageText = "通檢無法啟動"
         a.informativeText = msg
         a.alertStyle = .critical
         a.addButton(withTitle: "退出")
-        a.addButton(withTitle: "打開日誌")
+        if log { a.addButton(withTitle: "打開日誌") }
         if a.runModal() == .alertSecondButtonReturn { NSWorkspace.shared.open(logURL) }
         NSApp.terminate(nil)
     }
