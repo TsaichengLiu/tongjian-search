@@ -123,6 +123,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._raw(int(path[5:].split("/")[0]))
             if method == "GET" and path.startswith("/thumb/"):
                 return self._thumb(int(path[7:].split("/")[0]))
+            if method == "GET" and path.startswith("/docmedia/"):
+                data, ctype = App.lib.doc_media(int(path[10:].split("/")[0]), (qs.get("p") or [""])[-1])
+                if not data:
+                    return self._err(404, "not found")
+                return self._send(200, data, ctype, {"Cache-Control": "private, max-age=600"})
             if method == "GET" and path.startswith("/page/"):
                 fid, pg = path[6:].split("/")[:2]
                 w = (qs.get("w") or ["1400"])[-1]
@@ -267,6 +272,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_dups_verify(self, p, b):
         return App.lib.dups_verify(_int_list(b.get("ids") or []))
+
+    def api_docview(self, p, b):
+        return App.lib.doc_view(int(p["id"]))
 
     def api_pageboxes(self, p, b):
         return App.lib.page_boxes(int(p["id"]), int(p.get("p") or 1))

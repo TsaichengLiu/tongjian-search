@@ -15,11 +15,15 @@ import threading
 import time
 import traceback
 import urllib.parse
+import xml.etree.ElementTree as ET
+import zipfile
 import zlib
+import mimetypes
 from collections import OrderedDict, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
 from tj_extract import CODE_EXTS, EXTRACTOR_VERSION, INDEXABLE, REEXTRACT, Extractor, kind_of
+import tj_docx
 from tj_fuzzy import FuzzyTerm, pieces as fz_pieces
 from tj_norm import CJK_RE_CLASS, Normalizer, is_cjk
 from tj_sort import Collator, system_collation
@@ -1917,6 +1921,41 @@ class Library(object):
             o0, k = j + 1, k + 1
         j = text.find("\f", o0)
         return o0, text[o0:j if j >= 0 else len(text)]
+
+    DOC_VIEW_EXTS = ("docx", "dotx")
+
+    def doc_view(self, fid):
+        """Word 原件的版式模型（見 tj_docx）。模型與索引的文字逐字相同時才標註、互跳；
+        文件改過而尚未重新掃描的，照樣顯示，但標記 stale。"""
+        self.last_use = _now()
+        r = self._row(fid)
+        if r["ext"] not in self.DOC_VIEW_EXTS or not os.path.exists(r["path"]):
+            raise UserError("這個文件不能顯示原件")
+        try:
+            text, model = tj_docx.parse(r["path"])
+        except (zipfile.BadZipFile, KeyError, ET.ParseError, OSError) as e:
+            raise UserError("無法讀取這個 Word 文件：%s" % e)
+        stored = self.get_text(fid) if r["status"] == 1 else None
+        model["stale"] = stored != text
+        if len(text) > 400000:                     # 幾百萬字的匯總文件：只排前四十萬字
+            tj_docx.trim(model, 400000)
+        conv = u16_mapper(text)
+        if conv:
+            tj_docx.remap(model, conv)
+        model["id"] = fid
+        return model
+
+    def doc_media(self, fid, name):
+        """Word 文件裡的圖片（只限 word/media/ 下的成員）。"""
+        r = self._row(fid)
+        if r["ext"] not in self.DOC_VIEW_EXTS or not name.startswith("word/media/") or ".." in name:
+            return None, None
+        try:
+            with zipfile.ZipFile(r["path"]) as z:
+                data = z.read(name)
+        except (KeyError, zipfile.BadZipFile, OSError):
+            return None, None
+        return data, mimetypes.guess_type(name)[0] or "application/octet-stream"
 
     def page_boxes(self, fid, page):
         """原件上的標註：這一頁文字層的逐字位置，對回全文。

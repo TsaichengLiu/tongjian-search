@@ -55,7 +55,7 @@ const S = {
   res: null, items: [], cur: null, sel: new Set(), anchor: null,
   pv: null, pvTab: 'text', pvTabPref: 'text', hit: 0, hitEls: [], pendingPos: null,
   dirs: {}, openRoots: new Set(), openDirs: new Set(),
-  readerSize: 16, lastRescan: 0, pgLast: {}, pdfZoom: null, pdfFocus: null,
+  readerSize: 16, lastRescan: 0, pgLast: {}, pdfZoom: null, pdfFocus: null, docFocus: null,
   pendingSel: null, ctx: null,
 };
 
@@ -1138,7 +1138,7 @@ function tabsFor(pv) {
 function chooseTab(pv, pref) {
   const t = tabsFor(pv);
   if (pv.sparse && t.includes('orig') && pref !== 'info') return 'orig';   // 掃描件：全文幾乎是空的，先看原件
-  if (pref === 'orig' && t.includes('orig') && (pv.kind === 'pdf' || pv.kind === 'image')) return 'orig';
+  if (pref === 'orig' && t.includes('orig') && (pv.kind === 'pdf' || pv.kind === 'image' || docViewable(pv))) return 'orig';
   if (t.includes(pref) && pref !== 'orig') return pref;
   if (t.includes('text')) return 'text';
   if ((pv.kind === 'pdf' || pv.kind === 'image') && t.includes('orig')) return 'orig';
@@ -1389,10 +1389,284 @@ function renderOrig(body) {
   dropViewer();
   if (!pv.exists) { body.innerHTML = `<div class="pv-msg">文件已不在原處。</div>`; return; }
   if (pv.kind === 'pdf') return renderViewer(body, start);
+  if (docViewable(pv)) return renderDocView(body);
   if (pv.kind === 'image') body.innerHTML = `<div class="img-view"><img src="${rawUrl(pv.id)}" alt=""></div>`;
   else if (pv.ext === 'html' || pv.ext === 'htm') body.innerHTML = `<iframe class="frame" sandbox="" src="${rawUrl(pv.id)}"></iframe>`;
   else body.innerHTML = `<div class="pv-msg">這類文件不能在通檢裡直接顯示。<br>
     <button class="btn" data-act="ql">${I.eye}快速查看</button> <button class="btn primary" data-act="open">${I.open}打開</button></div>`;
+}
+
+// ===================================================================== Word 原件：通檢按 docx 自己排版
+// 版式模型由後台從 docx 讀出（tj_docx）：每段文字都帶它在全文裡的位置，所以標註、跳轉、選字與全文、索引一字不差。
+// 段落、字號、粗斜體、表格、圖片、文本框、腳註照原文件；按版心寬度連續排，分頁與 Word 不同。
+let DV = null;
+const DOC_VIEW_EXTS = new Set(['docx', 'dotx']);
+const docViewable = pv => !!pv && DOC_VIEW_EXTS.has(pv.ext);
+const canOrigPv = pv => !!pv && pv.exists && pv.status === 1 && ((pv.kind === 'pdf' && !pv.sparse) || docViewable(pv));
+function dropDocView() {
+  if (DV && DV.ro) DV.ro.disconnect();
+  DV = null;
+}
+async function renderDocView(body) {
+  const pv = S.pv;
+  dropDocView();
+  const dv = DV = { id: pv.id, zi: S.pdfZoom != null ? S.pdfZoom : 3, spans: [], focus: null, runs: [], box: null,
+    paper: null, model: null, stale: false, ro: null, t0: performance.now(), moved: false };
+  if (S.docFocus && S.docFocus.id === pv.id) { dv.focus = S.docFocus; S.pendingPos = null; }
+  S.docFocus = null;
+  body.innerHTML = `<div class="pgbar">
+      <button class="icon-btn pg-z" data-act="dv-zout" title="縮小（−）">−</button>
+      <span class="pg-zl" id="pg-zl"></span>
+      <button class="icon-btn pg-z" data-act="dv-zin" title="放大（＋）">＋</button>
+      <span class="pg-hint" id="dv-hint">正在排版……</span>
+    </div><div class="docv" id="docv" tabindex="0"></div>`;
+  dv.box = $('#docv', body);
+  let m = pv._doc;
+  if (!m) {
+    try { m = await api('docview?id=' + pv.id); } catch (err) {
+      if (DV === dv) { dv.box.innerHTML = `<div class="pv-msg">${esc(err.message)}</div>`; $('#dv-hint').textContent = ''; }
+      return;
+    }
+    pv._doc = m;                                  // 只在這個文件預覽期間留著
+  }
+  if (DV !== dv || S.pv !== pv) return;
+  dv.model = m;
+  dv.stale = !!m.stale;
+  dv.spans = dv.stale ? [] : annotSpans();
+  buildDocView(dv, m);
+  $('#dv-hint').textContent = (dv.stale ? '文件在上次掃描後改過：重新掃描（左下 ↻）後才能標註、互跳。' :
+    dv.spans.length ? '黃＝命中（雙擊回到全文）· 紅框＝當前位置 · ' : '') + '按原文件重新排版，分頁與 Word 不同' +
+    (m.truncated ? '；文件很長，只排了前一部分' : '');
+  dvZoom(dv.zi, true);
+  bindDocView(dv);
+  if (dv.focus) docFocus(dv.focus.s, dv.focus.e);
+  dv.ro = new ResizeObserver(() => { if (DV === dv && dv.box.clientWidth) dvZoom(dv.zi, true); });
+  dv.ro.observe(dv.box);
+}
+// 命中：dv.spans 裡第一個結束在 o 之後的
+function dvFirst(sp, o) {
+  let lo = 0, hi = sp.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (sp[m][1] <= o) lo = m + 1; else hi = m; }
+  return lo;
+}
+function buildDocView(dv, m) {
+  const frag = document.createDocumentFragment();
+  const st = document.createElement('style');
+  st.textContent = m.css.map((c, i) => `#docv .c${i}{${c}}`).join('\n');
+  frag.appendChild(st);
+  const paper = document.createElement('div');
+  paper.className = 'dpaper';
+  paper.style.cssText = `width:${m.page.w - m.page.ml - m.page.mr}px;padding:${m.page.mt}px ${m.page.mr}px ${m.page.mb}px ${m.page.ml}px;${m.base}`;
+  const tok = encodeURIComponent(S.token);
+  const run = (r, par) => {
+    if (typeof r[0] === 'number') {
+      const [o, x, ci] = r, end = o + x.length, sp = dv.spans;
+      let p = o, k = dvFirst(sp, o);
+      const put = (a, b, hit) => {
+        const el = document.createElement(hit != null ? 'mark' : 'span');
+        el.className = 'c' + ci + (hit != null ? ' dh' : '');
+        el.dataset.o = a;
+        if (hit != null) el.dataset.i = hit;
+        el.textContent = x.slice(a - o, b - o);
+        par.appendChild(el);
+        dv.runs.push(el);
+      };
+      while (p < end) {
+        if (k < sp.length && sp[k][0] < end) {
+          const a = Math.max(p, sp[k][0]), b = Math.min(end, sp[k][1]);
+          if (a > p) put(p, a, null);
+          put(a, b, k);
+          p = b;
+          if (sp[k][1] <= b) k++;
+        } else { put(p, end, null); p = end; }
+      }
+    } else if (r[0] === 'ref') {
+      const el = document.createElement('sup');
+      el.className = 'dref';
+      el.dataset.n = r[1];
+      par.appendChild(el);
+    } else if (r[0] === 'img') {
+      const el = document.createElement('img');
+      el.className = 'dimg';
+      el.loading = 'lazy';
+      el.decoding = 'async';
+      el.alt = '';
+      if (r[2] && r[3]) { el.width = r[2]; el.height = r[3]; }
+      el.onerror = () => el.classList.add('bad');
+      el.src = `/docmedia/${dv.id}?p=${encodeURIComponent(r[1])}&t=${tok}`;
+      par.appendChild(el);
+    } else if (r[0] === 'box') {
+      const el = document.createElement('div');
+      el.className = 'dbox';
+      blocks(r[1], el);
+      par.appendChild(el);
+    } else if (r[0] === 'pb') {
+      const el = document.createElement('span');
+      el.className = 'dpb';
+      par.appendChild(el);
+    }
+  };
+  const blocks = (bs, par) => {
+    for (const b of bs) {
+      if (b[0] === 'p') {
+        const el = document.createElement('div');
+        el.className = 'dp c' + b[1];
+        for (const r of b[2]) run(r, el);
+        if (!el.firstChild) el.appendChild(document.createElement('br'));
+        par.appendChild(el);
+        if (b[3]) { const pb = document.createElement('div'); pb.className = 'dpb'; par.appendChild(pb); }
+      } else if (b[0] === 'tbl') {
+        const t = document.createElement('table'), tb = document.createElement('tbody');
+        t.className = 'dtb';
+        for (const row of b[1]) {
+          const tr = document.createElement('tr');
+          for (const [cs, rs, inner] of row) {
+            const td = document.createElement('td');
+            if (cs > 1) td.colSpan = cs;
+            if (rs > 1) td.rowSpan = rs;
+            blocks(inner, td);
+            tr.appendChild(td);
+          }
+          tb.appendChild(tr);
+        }
+        t.appendChild(tb);
+        par.appendChild(t);
+      } else if (b[0] === 'pb') {
+        const el = document.createElement('div');
+        el.className = 'dpb';
+        par.appendChild(el);
+      }
+    }
+  };
+  blocks(m.blocks, paper);
+  if (m.notes.length) {
+    const box = document.createElement('div');
+    box.className = 'dnotes';
+    for (const [n, bs] of m.notes) {
+      const el = document.createElement('div'), num = document.createElement('span'), body = document.createElement('div');
+      el.className = 'dnote';
+      el.dataset.n = n;
+      num.className = 'dn-num';
+      num.dataset.n = n;
+      blocks(bs, body);
+      el.append(num, body);
+      box.appendChild(el);
+    }
+    paper.appendChild(box);
+  }
+  frag.appendChild(paper);
+  dv.box.textContent = '';
+  dv.box.appendChild(frag);
+  dv.paper = paper;
+}
+function dvZoom(z, fit) {
+  const dv = DV;
+  if (!dv || !dv.paper || !dv.model) return;
+  z = Math.max(0, Math.min(PDFV_ZOOMS.length - 1, z));
+  if (z === dv.zi && !fit) return;
+  const box = dv.box, k = box.scrollTop / Math.max(1, box.scrollHeight);
+  dv.zi = S.pdfZoom = z;
+  const fitZ = Math.min(1.5, Math.max(0.3, (box.clientWidth - 28) / dv.model.page.w));
+  dv.paper.style.zoom = (fitZ * PDFV_ZOOMS[z]).toFixed(3);
+  const zl = $('#pg-zl');
+  if (zl) zl.textContent = Math.round(PDFV_ZOOMS[z] * 100) + '%';
+  if (!fit) box.scrollTop = k * box.scrollHeight;
+}
+// 原件上的某處（檢索片段懸停、全文雙擊、右鍵「在原件中查看此處」）：是命中就紅框標出，否則選中那段；不在視區才滾
+function docFocus(s, e) {
+  const dv = DV;
+  if (!dv || dv.stale || !dv.paper) return;
+  e = e == null ? s : e;
+  dv.box.querySelectorAll('.dfoc').forEach(x => x.classList.remove('dfoc'));
+  const k = dv.spans.findIndex(sp => sp[0] < Math.max(e, s + 1) && sp[1] > s);
+  let target = null;
+  if (k >= 0) {
+    const ms = dv.box.querySelectorAll(`mark.dh[data-i="${k}"]`);
+    ms.forEach(x => x.classList.add('dfoc'));
+    target = ms[0];
+  } else {
+    const at = o => {                                       // 含位置 o 的那段字
+      let lo = 0, hi = dv.runs.length - 1;
+      while (lo < hi) { const m = (lo + hi + 1) >> 1; if (+dv.runs[m].dataset.o <= o) lo = m; else hi = m - 1; }
+      return dv.runs[lo];
+    };
+    const a = at(s), b = at(Math.max(s, e - 1));
+    if (a && b && a.firstChild && b.firstChild) {
+      const r = document.createRange();
+      r.setStart(a.firstChild, Math.min(a.firstChild.length, Math.max(0, s - +a.dataset.o)));
+      r.setEnd(b.firstChild, Math.min(b.firstChild.length, Math.max(0, e - +b.dataset.o)));
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(r);
+      target = a;
+    }
+  }
+  if (target) {
+    const rr = target.getBoundingClientRect();
+    if (!inView(dv.box, rr)) dv.box.scrollTop += rr.top - dv.box.getBoundingClientRect().top - dv.box.clientHeight / 3;
+  }
+}
+function bindDocView(dv) {
+  const box = dv.box;
+  box.addEventListener('mousedown', e => {
+    if (e.detail > 1 && e.target.closest('mark.dh')) e.preventDefault();   // 雙擊命中：不選詞
+  });
+  box.addEventListener('dblclick', e => {
+    const m = e.target.closest('mark.dh');
+    if (!m || dv.stale) return;
+    const sp = dv.spans[+m.dataset.i];
+    if (!sp) return;
+    e.preventDefault();
+    window.getSelection().removeAllRanges();
+    gotoText(sp[0], sp[1]);
+  });
+  box.addEventListener('click', e => {
+    const ref = e.target.closest('sup.dref');
+    if (!ref) return;
+    const n = [...box.querySelectorAll('.dnote')].find(x => x.dataset.n === ref.dataset.n);
+    if (n) n.scrollIntoView({ block: 'center' });
+  });
+  box.addEventListener('wheel', e => {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    dv.pinch = (dv.pinch || 0) + e.deltaY;
+    if (Math.abs(dv.pinch) > 30) { dvZoom(dv.zi + (dv.pinch < 0 ? 1 : -1)); dv.pinch = 0; }
+  }, { passive: false });
+  box.addEventListener('keydown', e => {
+    const k = e.key;
+    if (k === '+' || k === '=') dvZoom(dv.zi + 1);
+    else if (k === '-' || k === '_') dvZoom(dv.zi - 1);
+    else if (k === '0') dvZoom(3);
+    else return;
+    e.preventDefault();
+    e.stopPropagation();
+  });
+  box.addEventListener('contextmenu', e => {
+    const ts = origSelection(), sel = window.getSelection();
+    if (ts && selectionUnder(sel, e.clientX, e.clientY)) {
+      e.stopPropagation();
+      S.ctx = { kind: 'orig', id: S.pv.id, sel: ts.text, s: ts.s, e: ts.e };
+      if (S.native) return nativeMenu({ kind: 'orig', sel: ts.text.slice(0, 80) });
+      e.preventDefault();
+      return origSelMenu(e.clientX, e.clientY);
+    }
+    e.preventDefault();
+    let o = null;
+    const cr = !dv.stale && document.caretRangeFromPoint && document.caretRangeFromPoint(e.clientX, e.clientY);
+    if (cr && cr.startContainer.nodeType === 3) {
+      const el = cr.startContainer.parentNode;
+      if (el && el.dataset && el.dataset.o != null) o = +el.dataset.o + cr.startOffset;
+    }
+    showMenu(e.clientX, e.clientY, [
+      o != null && { label: '在全文中查看此處', icon: 'page', act: () => gotoText(o, o) },
+      o != null && { sep: true },
+      { label: '放大', key: '+', act: () => dvZoom(dv.zi + 1) },
+      { label: '縮小', key: '−', act: () => dvZoom(dv.zi - 1) },
+      { label: '適合寬度', key: '0', act: () => dvZoom(3) },
+      { sep: true },
+      { label: '用默認程序打開', icon: 'open', act: () => doOpen(S.pv.id) },
+    ]);
+  });
 }
 
 // ===================================================================== 原件：逐頁圖片，可標註
@@ -1404,6 +1678,7 @@ const SVGNS = 'http://www.w3.org/2000/svg';
 const CHEV_L = I.chev.replace('<svg', '<svg style="transform:rotate(180deg)"');
 let V = null;
 function dropViewer() {
+  dropDocView();
   if (!V) return;
   if (V.ro) V.ro.disconnect();
   for (const pg of V.live.values()) clearTimeout(pg.timer);
@@ -1758,29 +2033,33 @@ function markTl(pg) {
 }
 // 原件上選中的文字 → 全文裡的範圍（按全文取，保留換行）
 function origSelection() {
-  if (!V || !S.pv || !S.pv.text) return null;
+  const box = V ? V.box : DV && !DV.stale ? DV.box : null;
+  if (!box || !S.pv || !S.pv.text) return null;
   const sel = window.getSelection();
-  if (!sel || sel.isCollapsed || !sel.rangeCount || !V.box.contains(sel.anchorNode)) return null;
+  if (!sel || sel.isCollapsed || !sel.rangeCount || !box.contains(sel.anchorNode)) return null;
   const r = sel.getRangeAt(0);
-  // 選區端點 → 全文位置：在字的文字節點裡、在字的 span 上、或在文字層的兩個字之間
+  // 選區端點 → 全文位置：在一段字的文字節點裡、在帶位置的元素上、或在兩段字之間（容器加子節點序號）
   const spanPos = (sp, after) => +sp.dataset.o + (after ? sp.textContent.length : 0);
+  const pick = (el, last) => !el || el.nodeType !== 1 ? null : el.dataset && el.dataset.o != null ? el :
+    last ? [...el.querySelectorAll('[data-o]')].pop() : el.querySelector('[data-o]');
   const at = (node, off) => {
     if (!node) return null;
     if (node.nodeType === 3) {
       const sp = node.parentNode;
-      return sp && sp.dataset && sp.dataset.o != null ? spanPos(sp, off > 0) : null;
+      return sp && sp.dataset && sp.dataset.o != null ? +sp.dataset.o + Math.min(off, node.length) : null;
     }
     if (node.dataset && node.dataset.o != null) return spanPos(node, off > 0);
-    if (node.classList && node.classList.contains('pdfv-tl') && node.children.length) {
-      const kids = node.children;
-      return off < kids.length ? spanPos(kids[off], false) : spanPos(kids[kids.length - 1], true);
-    }
-    return null;
+    const kids = node.childNodes;
+    if (!kids || !kids.length) return null;
+    if (off < kids.length) { const el = pick(kids[off], false); if (el) return spanPos(el, false); }
+    const el = pick(kids[Math.min(off, kids.length) - 1], true);
+    return el ? spanPos(el, true) : null;
   };
   let s = at(r.startContainer, r.startOffset), e = at(r.endContainer, r.endOffset);
   if (s == null || e == null) {                            // 選區端點落在字外：按選中的字定
     let lo = Infinity, hi = -1;
-    for (const pg of V.live.values()) if (pg.tl) for (const sp of pg.tl.children) {
+    const all = V ? [...V.live.values()].flatMap(pg => pg.tl ? [...pg.tl.children] : []) : DV.runs;
+    for (const sp of all) {
       if (!sel.containsNode(sp, false)) continue;   // 整個字在選區裡才算
       const o = +sp.dataset.o;
       lo = Math.min(lo, o); hi = Math.max(hi, o + sp.textContent.length);
@@ -1954,6 +2233,7 @@ function revealHit(id, s, e) {
     return selectReaderRange(s, e);
   }
   if (S.pvTab === 'orig' && V && V.id === id) focusOrig(s, e);
+  if (S.pvTab === 'orig' && DV && DV.id === id) docFocus(s, e);
 }
 function snipHit(e) {
   const h = e.target.closest && e.target.closest('.item.sel .snip .sh');
@@ -2046,9 +2326,12 @@ function gotoText(s, e) {
 }
 function locateInOrig(s, e) {
   const pv = S.pv;
-  if (!pv || pv.kind !== 'pdf' || s == null) return;
-  S.pdfFocus = { id: pv.id, s, e: e == null ? s : e };
-  S.origPage = pageOfOffset(pv, s);
+  if (!canOrigPv(pv) || s == null) return;
+  if (docViewable(pv)) S.docFocus = { id: pv.id, s, e: e == null ? s : e };
+  else {
+    S.pdfFocus = { id: pv.id, s, e: e == null ? s : e };
+    S.origPage = pageOfOffset(pv, s);
+  }
   S.pvTab = S.pvTabPref = 'orig';
   renderPreviewBody();
 }
@@ -2141,7 +2424,7 @@ function renderReader(body) {
 function paintReader() {
   const pv = S.pv, reader = $('#reader');
   if (!pv || !reader || pv.text == null) return;
-  const canOrig = pv.kind === 'pdf' && pv.status === 1 && !pv.sparse && pv.exists;
+  const canOrig = canOrigPv(pv);
   reader.classList.toggle('can-orig', canOrig);
   // 查找框有內容時，高亮查找結果；否則高亮主檢索詞
   const src = findActive() ? (findReady() ? S.find.res : { spans: [], diffs: [], qchars: '' }) : pv;
@@ -2433,6 +2716,8 @@ $('#preview').addEventListener('click', async e => {
     case 'pg-next': return V && toPage(V.cur + 1);
     case 'pg-zin': return V && vZoom(V.zi + 1);
     case 'pg-zout': return V && vZoom(V.zi - 1);
+    case 'dv-zin': return DV && dvZoom(DV.zi + 1);
+    case 'dv-zout': return DV && dvZoom(DV.zi - 1);
     case 'find-fz': {
       S.find.fz = !S.find.fz;
       b.classList.toggle('on', S.find.fz);
@@ -2903,7 +3188,8 @@ function showHelp() {
     <div class="field"><label>PDF 原件</label>
       <p class="hint" style="margin:0">「原件」逐頁顯示，黃底標出命中。先單擊選中左側的文件，再把鼠標停在它片段裡命中的詞上，右側預覽（全文或原件）就跳到那一處。<br>
       雙擊命中的詞，在全文與原件之間來回跳（原件上用紅框標出）；全文裡其他位置可右鍵 →「在原件中查看此處」，原件上右鍵 →「在全文中查看這段」。原件上可以直接拖選文字、⌘C 拷貝（保留換行），右鍵可檢索、附出處拷貝、在全文中查看；空白處拖動平移。<br>
-      掃描件沒有文字層，無法標註。</p></div>
+      掃描件沒有文字層，無法標註。<br>
+      Word（docx）的「原件」由通檢按原文件重新排版（分頁與 Word 不同），標註、懸停跳轉、雙擊互跳、選字都與 PDF 一樣。</p></div>
     <div class="field"><label>三種匹配方式</label>
       <p class="hint" style="margin:0">精確 —— 只匹配輸入的字形（不分大小寫、全半角）<br>
       簡繁 —— 簡體與繁體互通，如 后/後、历/歷/曆<br>
@@ -3168,7 +3454,7 @@ document.addEventListener('contextmenu', e => {
       if (cr) s = en = readerOffset(cr.startContainer, cr.startOffset);
     }
     S.ctx = { kind: 'reader', id: S.pv.id, sel: inSel ? selText : '', s, e: en };
-    const pdf = S.pv.kind === 'pdf' && S.pv.status === 1 && s != null;
+    const pdf = canOrigPv(S.pv) && s != null;
     if (!S.native) { e.preventDefault(); return readerMenu(e.clientX, e.clientY, pdf); }
     return nativeMenu({ kind: 'reader', sel: S.ctx.sel.slice(0, 80), pdf });
   }

@@ -564,6 +564,32 @@ mark, .h1, .h2 { color: inherit; border-radius: 2px; }
 }
 .reader.can-orig mark { cursor: pointer; }
 .pdfv.over-hit { cursor: pointer; }
+/* Word 原件：白紙版心，連續排 */
+.docv { flex: 1; min-height: 0; overflow: auto; background: var(--paper); padding: 14px 14px 48px; outline: none; }
+.dpaper {
+  margin: 0 auto; background: #fff; color: #1b1b1b; box-shadow: var(--shadow-2); line-height: 1.5; font-size: 14px;
+  user-select: text; -webkit-user-select: text; box-sizing: content-box; text-align: left;
+}
+.dpaper .dp { white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; min-height: 1em;
+  content-visibility: auto; contain-intrinsic-size: auto 1.6em; }   /* 視區外的段落不排版、不繪製 */
+.dpaper .dp + .dp { margin-top: 0; }
+.dpaper .dpb { display: block; height: 0; border-top: 1px dashed #cfc8bb; margin: 22px 0; }
+.dpaper table.dtb { border-collapse: collapse; margin: 6px 0; max-width: 100%; }
+.dpaper .dtb td { border: 1px solid #9a9a9a; padding: 2px 6px; vertical-align: top; }
+.dpaper .dbox { border: 1px solid #bcbcbc; padding: 4px 8px; margin: 4px 0; white-space: normal; }
+.dpaper .dimg { max-width: 100%; height: auto; vertical-align: middle; }
+.dpaper .dimg.bad { display: inline-block; width: 60px; height: 40px; background: #eee; outline: 1px dashed #bbb; }
+.dpaper sup.dref { cursor: pointer; padding: 0 1px; color: #2f62b5; line-height: 0; }
+.dpaper sup.dref::after { content: attr(data-n); font-size: .72em; }
+.dpaper .dnotes { margin-top: 30px; border-top: 1px solid #c4c4c4; padding-top: 10px; font-size: .86em; }
+.dpaper .dnote { display: flex; gap: 8px; margin: 3px 0; }
+.dpaper .dn-num { flex: none; min-width: 1.6em; text-align: right; color: #2f62b5; }
+.dpaper .dn-num::after { content: attr(data-n) "."; }
+.dpaper .dnote > div { flex: 1; min-width: 0; }
+.dpaper mark.dh { background: rgba(240, 180, 67, .45); color: inherit; border-radius: 2px; cursor: pointer; }
+.dpaper mark.dh:hover { box-shadow: 0 0 0 1.5px #b5402b, 0 0 0 4px rgba(181, 64, 43, .22); }
+.dpaper mark.dfoc { box-shadow: 0 0 0 2px #b5402b; background: rgba(181, 64, 43, .10); }
+.dpaper ::selection { background: rgba(47, 98, 181, .28); }
 .pm-hov { fill: none; stroke: #b5402b; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .pm-hov-halo { fill: none; stroke: rgba(181, 64, 43, .22); stroke-width: 6; vector-effect: non-scaling-stroke; }
 .pm-hit { fill: rgba(240, 180, 67, .40); }
