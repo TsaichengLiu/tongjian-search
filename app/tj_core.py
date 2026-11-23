@@ -19,7 +19,7 @@ import zlib
 from collections import OrderedDict, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
-from tj_extract import CODE_EXTS, EXTRACTOR_VERSION, INDEXABLE, Extractor, kind_of
+from tj_extract import CODE_EXTS, EXTRACTOR_VERSION, INDEXABLE, REEXTRACT, Extractor, kind_of
 from tj_fuzzy import FuzzyTerm, pieces as fz_pieces
 from tj_norm import CJK_RE_CLASS, Normalizer, is_cjk
 from tj_sort import Collator, system_collation
@@ -749,7 +749,8 @@ class Library(object):
             ext = rec[6]
             same = rec[2] == st.st_size and abs((rec[3] or 0) - st.st_mtime) < 0.001
             ix = self.indexable(ext)
-            stale = ix and (rec[4] == 0 or (rec[4] == 3 and rec[5] != EXTRACTOR_VERSION))
+            stale = ix and (rec[4] == 0 or (rec[4] == 3 and rec[5] != EXTRACTOR_VERSION) or
+                            (rec[4] == 1 and (rec[5] or 0) < REEXTRACT.get(ext, 0)))
             dropped = not ix and rec[4] == 1          # 不再收全文的格式
             if same and not stale and not dropped:
                 continue
@@ -1331,9 +1332,9 @@ class Library(object):
             for rx in rxs:
                 if rx.search(text):
                     return None
-        spans, sims, ctx = [], [], {}
+        spans, sims, ctx, groups = [], [], {}, []
         for rxs in pos:
-            got, best = False, 0.0
+            got, best, n0 = False, 0.0, len(spans)
             for rx in rxs:
                 if isinstance(rx, FuzzyTerm):
                     for a, b, d in rx.finditer(text, cap, ctx, stop):
@@ -1351,8 +1352,10 @@ class Library(object):
             if not got:
                 return None
             sims.append(best)
+            groups.append(sorted(a for a, b in spans[n0:]))     # 這個詞的各處命中（起點）
         if info is not None:
             info["sim"] = min(sims) if sims else 1.0
+            info["groups"] = groups
         spans.sort()
         merged = []
         for s, e in spans:
@@ -1363,19 +1366,47 @@ class Library(object):
                 merged.append((s, e))
         return merged
 
-    def _snippets(self, text, spans, hl, n=3, before=34, after=70):
-        out = []
+    def _snippets(self, text, spans, hl, n=3, before=34, after=70, groups=None):
+        """結果列表裡的片段（至多 n 段）。只有一個檢索詞時取最前面幾處；有幾個詞時先讓每個詞都至少露面一次，
+        幾個詞同在一段的優先，再按出現的先後補足，最後按原文順序排列。"""
         page_starts = None
         if "\f" in text:
             page_starts = [0] + [m.end() for m in re.finditer("\f", text)]
-        last_end = None
-        for s, e in spans:
-            if len(out) >= n:
-                break
-            if last_end is not None and s < last_end + 40:
-                continue
-            a = max(0, s - before)
-            b = min(len(text), e + after)
+        wins = []
+        if not groups or len(groups) < 2:
+            last_end = None
+            for s, e in spans:
+                if len(wins) >= n:
+                    break
+                if last_end is not None and s < last_end + 40:
+                    continue
+                wins.append((s, max(0, s - before), min(len(text), e + after)))
+                last_end = wins[-1][2]
+        else:
+            def has(st, a, b):
+                k = bisect.bisect_left(st, a)
+                return k < len(st) and st[k] < b
+            cands = []
+            for s, e in spans:
+                a, b = max(0, s - before), min(len(text), e + after)
+                cands.append((s, a, b, frozenset(i for i, st in enumerate(groups) if has(st, a, b))))
+            free = lambda c: all(c[2] + 20 <= w[1] or c[1] >= w[2] + 20 for w in wins)
+            left = set(range(len(groups)))
+            while left and len(wins) < n:                 # 每個詞至少一處；能同時帶出幾個詞的優先
+                best = max((c for c in cands if c[3] & left and free(c)),
+                           key=lambda c: (len(c[3] & left), len(c[3]), -c[0]), default=None)
+                if best is None:
+                    break
+                wins.append(best)
+                left -= best[3]
+            for c in sorted(cands, key=lambda c: (-len(c[3]), c[0])):   # 補足：同時有幾個詞的在前，其次按先後
+                if len(wins) >= n:
+                    break
+                if free(c):
+                    wins.append(c)
+            wins = sorted(w[:3] for w in wins)
+        out = []
+        for s, a, b in wins:
             # 窗口內所有命中一起高亮
             inner = [(max(a, x), min(b, y)) for x, y in spans if y > a and x < b]
             segs = self.segs(text[a:b], [(x - a, y - a) for x, y in inner], hl, base=a)
@@ -1387,7 +1418,6 @@ class Library(object):
                 segs.append(["…", 0])
             page = bisect.bisect_right(page_starts, s) if page_starts else None
             out.append({"segs": segs, "page": page, "pos": s})
-            last_end = b
         return out
 
     def _item(self, r):
@@ -1531,7 +1561,7 @@ class Library(object):
                         found[r["id"]] = it
                     it["hits"] = len(spans)
                     it["capped"] = len(spans) >= 3000
-                    it["snippets"] = self._snippets(text, spans, Q)
+                    it["snippets"] = self._snippets(text, spans, Q, groups=info.get("groups"))
                     u16 = u16_mapper(text)
                     if u16:
                         for sn in it["snippets"]:

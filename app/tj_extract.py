@@ -8,7 +8,9 @@ import shutil
 import subprocess
 import zipfile
 
-EXTRACTOR_VERSION = 3
+EXTRACTOR_VERSION = 4
+# 抽取方式改過的格式：用舊版抽出的文件下次掃描時重抽（4：Word 不再收修訂中刪掉的文字和域代碼）
+REEXTRACT = {"docx": 4, "dotx": 4}
 
 KINDS = {
     "pdf": ("pdf",),
@@ -143,6 +145,11 @@ def _xml_text(s, para_tags):
     return html.unescape(_TAG.sub("", s))
 
 
+# Word 裡不屬於正文的文字：修訂中刪掉的（w:del、移走的 w:moveFrom）、域代碼（HYPERLINK、TOC、PAGE 之類）
+_DOCX_DROP = re.compile(r"<w:(del|moveFrom)\b[^>]*(?<!/)>.*?</w:\1>"
+                        r"|<w:(instrText|delInstrText|delText)\b[^>]*(?<!/)>.*?</w:\2>", re.S)
+
+
 def _natural_key(name):
     return [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", name)]
 
@@ -154,7 +161,7 @@ def extract_zip(path, ext):
         if ext in ("docx", "dotx"):
             parts = [n for n in ("word/document.xml", "word/footnotes.xml", "word/endnotes.xml")
                      if n in names]
-            return "\n".join(_xml_text(rd(n), ["</w:p>"]) for n in parts)
+            return "\n".join(_xml_text(_DOCX_DROP.sub("", rd(n)), ["</w:p>"]) for n in parts)
         if ext == "pptx":
             slides = sorted([n for n in names if re.match(r"ppt/slides/slide\d+\.xml$", n)],
                             key=_natural_key)
