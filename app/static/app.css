@@ -406,15 +406,17 @@ select:focus { border-color: var(--accent); }
 .kwic-more { border: 0; background: none; padding: 0 0 0 6px; color: var(--accent); font-size: 11.5px; }
 .kwic-more:hover { text-decoration: underline; }
 .kwic-close { border: 0; background: none; color: var(--text-3); font-size: 11.5px; display: inline-flex; align-items: center; gap: 2px; padding: 0; }
+/* 普通的塊排列，不用 flex：每條都有 overflow:hidden（兩行截斷），在有限高度的 flex 列裡會被壓扁成幾像素 */
 .snips.kwic {
-  margin-top: 2px; max-height: min(56vh, 520px); overflow-y: auto; gap: 1px; padding: 2px 4px 4px 0;
+  display: block; margin-top: 2px; max-height: min(56vh, 520px); overflow-y: auto; padding: 2px 4px 4px 0;
   border-top: 1px solid var(--line); overscroll-behavior: contain;
 }
+.kwic .snip + .snip { margin-top: 1px; }
 .snips.kwic:empty { min-height: 24px; }
-.kwic .snip { padding: 3px 6px 3px 0; border-radius: 6px; cursor: pointer; }
+.kwic .snip { position: relative; padding: 3px 6px 3px 2.4em; border-radius: 6px; cursor: pointer; }
 .kwic .snip:hover { background: rgba(120, 100, 70, .06); }
 .kwic .snip.cur { background: var(--sel); box-shadow: inset 2px 0 0 var(--accent); }
-.kwic .kn { display: inline-block; min-width: 2.2em; text-align: right; margin-right: 6px; font: 500 10.5px var(--ui); color: var(--text-3); font-variant-numeric: tabular-nums; vertical-align: 1px; }
+.kwic .kn { position: absolute; left: 0; top: 4px; width: 1.9em; text-align: right; font: 500 10.5px var(--ui); color: var(--text-3); font-variant-numeric: tabular-nums; vertical-align: 1px; }
 .snip .pg {
   display: inline-block; font: 600 10px/16px var(--ui); color: var(--text-3); border: 1px solid var(--line-2);
   border-radius: 4px; padding: 0 4px; margin-right: 6px; vertical-align: 1px;
