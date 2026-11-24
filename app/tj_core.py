@@ -23,6 +23,7 @@ from collections import OrderedDict, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
 from tj_extract import CODE_EXTS, EXTRACTOR_VERSION, INDEXABLE, REEXTRACT, Extractor, kind_of
+import tj_doc
 import tj_docx
 from tj_fuzzy import FuzzyTerm, pieces as fz_pieces
 from tj_norm import CJK_RE_CLASS, Normalizer, is_cjk
@@ -1922,7 +1923,7 @@ class Library(object):
         j = text.find("\f", o0)
         return o0, text[o0:j if j >= 0 else len(text)]
 
-    DOC_VIEW_EXTS = ("docx", "dotx")
+    DOC_VIEW_EXTS = ("docx", "dotx", "doc", "dot")
 
     def doc_view(self, fid):
         """Word 原件的版式模型（見 tj_docx）。模型與索引的文字逐字相同時才標註、互跳；
@@ -1932,8 +1933,11 @@ class Library(object):
         if r["ext"] not in self.DOC_VIEW_EXTS or not os.path.exists(r["path"]):
             raise UserError("這個文件不能顯示原件")
         try:
-            text, model = tj_docx.parse(r["path"])
-        except (zipfile.BadZipFile, KeyError, ET.ParseError, OSError) as e:
+            if r["ext"] in ("doc", "dot"):
+                text, model = tj_doc.parse(r["path"])[:2]   # textutil 轉出的 docx 用完即丟（.doc 的圖片它不保留）
+            else:
+                text, model = tj_docx.parse(r["path"])
+        except (zipfile.BadZipFile, KeyError, ET.ParseError, OSError, RuntimeError, subprocess.SubprocessError) as e:
             raise UserError("無法讀取這個 Word 文件：%s" % e)
         stored = self.get_text(fid) if r["status"] == 1 else None
         model["stale"] = stored != text
@@ -1948,7 +1952,7 @@ class Library(object):
     def doc_media(self, fid, name):
         """Word 文件裡的圖片（只限 word/media/ 下的成員）。"""
         r = self._row(fid)
-        if r["ext"] not in self.DOC_VIEW_EXTS or not name.startswith("word/media/") or ".." in name:
+        if r["ext"] not in ("docx", "dotx") or not name.startswith("word/media/") or ".." in name:
             return None, None
         try:
             with zipfile.ZipFile(r["path"]) as z:

@@ -8,13 +8,15 @@ import shutil
 import subprocess
 import zipfile
 
+import tj_doc
 import tj_docx
 
-EXTRACTOR_VERSION = 5
+EXTRACTOR_VERSION = 6
 # 抽取方式改過的格式：用舊版抽出的文件下次掃描時重抽
 #   4：Word 不再收修訂中刪掉的文字和域代碼
 #   5：Word 改用 tj_docx（與原件視圖同源）：不再收域的二進制數據、圖形坐標、舊式文本框的重複文字、注音
-REEXTRACT = {"docx": 5, "dotx": 5}
+#   6：Word 97–2003（doc）改用 tj_doc：腳註、尾註單獨成段，不再收域代碼
+REEXTRACT = {"docx": 5, "dotx": 5, "doc": 6, "dot": 6}
 
 KINDS = {
     "pdf": ("pdf",),
@@ -249,6 +251,8 @@ class Extractor(object):
                     t = html.unescape(_TAG.sub(" ", t))
             elif ext in ZIP_EXTS:
                 t = extract_zip(path, ext)
+            elif ext in ("doc", "dot"):
+                t = tj_doc.text_of(path)
             elif ext in TEXTUTIL_EXTS:
                 t = _run(["/usr/bin/textutil", "-convert", "txt", "-stdout",
                           "-encoding", "UTF-8", path], 180).decode("utf-8", "replace")

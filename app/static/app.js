@@ -1400,7 +1400,7 @@ function renderOrig(body) {
 // 版式模型由後台從 docx 讀出（tj_docx）：每段文字都帶它在全文裡的位置，所以標註、跳轉、選字與全文、索引一字不差。
 // 段落、字號、粗斜體、表格、圖片、文本框、腳註照原文件；按版心寬度連續排，分頁與 Word 不同。
 let DV = null;
-const DOC_VIEW_EXTS = new Set(['docx', 'dotx']);
+const DOC_VIEW_EXTS = new Set(['docx', 'dotx', 'doc', 'dot']);
 const docViewable = pv => !!pv && DOC_VIEW_EXTS.has(pv.ext);
 const canOrigPv = pv => !!pv && pv.exists && pv.status === 1 && ((pv.kind === 'pdf' && !pv.sparse) || docViewable(pv));
 function dropDocView() {
@@ -1449,14 +1449,16 @@ function dvFirst(sp, o) {
   while (lo < hi) { const m = (lo + hi) >> 1; if (sp[m][1] <= o) lo = m + 1; else hi = m; }
   return lo;
 }
+// 縮放：不用 CSS zoom（WebKit 裡元素位置與點擊位置會對不上），而是把版式裡所有像素尺寸乘上 --z，真正重新排版
+const dvPx = css => css.replace(/(-?\d+(?:\.\d+)?)px/g, 'calc(var(--z) * $1px)');
 function buildDocView(dv, m) {
   const frag = document.createDocumentFragment();
   const st = document.createElement('style');
-  st.textContent = m.css.map((c, i) => `#docv .c${i}{${c}}`).join('\n');
+  st.textContent = m.css.map((c, i) => `#docv .c${i}{${dvPx(c)}}`).join('\n');
   frag.appendChild(st);
   const paper = document.createElement('div');
   paper.className = 'dpaper';
-  paper.style.cssText = `width:${m.page.w - m.page.ml - m.page.mr}px;padding:${m.page.mt}px ${m.page.mr}px ${m.page.mb}px ${m.page.ml}px;${m.base}`;
+  paper.style.cssText = dvPx(`width:${m.page.w - m.page.ml - m.page.mr}px;padding:${m.page.mt}px ${m.page.mr}px ${m.page.mb}px ${m.page.ml}px;font-size:14px;${m.base}`);
   const tok = encodeURIComponent(S.token);
   const run = (r, par) => {
     if (typeof r[0] === 'number') {
@@ -1491,7 +1493,7 @@ function buildDocView(dv, m) {
       el.loading = 'lazy';
       el.decoding = 'async';
       el.alt = '';
-      if (r[2] && r[3]) { el.width = r[2]; el.height = r[3]; }
+      if (r[2] && r[3]) { el.style.width = `calc(var(--z) * ${r[2]}px)`; el.style.height = 'auto'; el.style.aspectRatio = `${r[2]} / ${r[3]}`; }
       el.onerror = () => el.classList.add('bad');
       el.src = `/docmedia/${dv.id}?p=${encodeURIComponent(r[1])}&t=${tok}`;
       par.appendChild(el);
@@ -1503,6 +1505,11 @@ function buildDocView(dv, m) {
     } else if (r[0] === 'pb') {
       const el = document.createElement('span');
       el.className = 'dpb';
+      par.appendChild(el);
+    } else if (r[0] === 'pic') {
+      const el = document.createElement('span');
+      el.className = 'dpic';
+      el.title = '原文件此處有圖片或嵌入對象（doc 格式的原件視圖不顯示圖片）';
       par.appendChild(el);
     }
   };
@@ -1567,7 +1574,7 @@ function dvZoom(z, fit) {
   const box = dv.box, k = box.scrollTop / Math.max(1, box.scrollHeight);
   dv.zi = S.pdfZoom = z;
   const fitZ = Math.min(1.5, Math.max(0.3, (box.clientWidth - 28) / dv.model.page.w));
-  dv.paper.style.zoom = (fitZ * PDFV_ZOOMS[z]).toFixed(3);
+  dv.paper.style.setProperty('--z', (fitZ * PDFV_ZOOMS[z]).toFixed(3));
   const zl = $('#pg-zl');
   if (zl) zl.textContent = Math.round(PDFV_ZOOMS[z] * 100) + '%';
   if (!fit) box.scrollTop = k * box.scrollHeight;
@@ -3189,7 +3196,7 @@ function showHelp() {
       <p class="hint" style="margin:0">「原件」逐頁顯示，黃底標出命中。先單擊選中左側的文件，再把鼠標停在它片段裡命中的詞上，右側預覽（全文或原件）就跳到那一處。<br>
       雙擊命中的詞，在全文與原件之間來回跳（原件上用紅框標出）；全文裡其他位置可右鍵 →「在原件中查看此處」，原件上右鍵 →「在全文中查看這段」。原件上可以直接拖選文字、⌘C 拷貝（保留換行），右鍵可檢索、附出處拷貝、在全文中查看；空白處拖動平移。<br>
       掃描件沒有文字層，無法標註。<br>
-      Word（docx）的「原件」由通檢按原文件重新排版（分頁與 Word 不同），標註、懸停跳轉、雙擊互跳、選字都與 PDF 一樣。</p></div>
+      Word（docx、doc）的「原件」由通檢按原文件重新排版（分頁與 Word 不同），標註、懸停跳轉、雙擊互跳、選字都與 PDF 一樣。</p></div>
     <div class="field"><label>三種匹配方式</label>
       <p class="hint" style="margin:0">精確 —— 只匹配輸入的字形（不分大小寫、全半角）<br>
       簡繁 —— 簡體與繁體互通，如 后/後、历/歷/曆<br>
