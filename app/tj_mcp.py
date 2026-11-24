@@ -58,13 +58,16 @@ _RO = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "
 TOOLS = [
     {"name": "search", "title": "檢索文件名與全文",
      "description": ("在通檢的索引裡檢索本機文件（文件名、文件夾名、全文），簡繁異體互通（查「万历」可得「萬曆」「萬歷」）。"
-                     "語法：空格＝且，|＝或，-詞＝排除，\"…\"＝含空格的西文短語。fuzzy 可容許異文，適合拿一句原文找它被引用、轉錄的地方。"
+                     "語法：空格＝且，|＝或，-詞（或 !詞）＝排除，\"…\"＝含空格的西文短語，* 任意幾個字（不跨句）、? 一個字。fuzzy 可容許異文，適合拿一句原文找它被引用、轉錄的地方。"
+                     "檢索式裡還可以寫篩選詞：ext:pdf;docx、size:>10mb、dm:2024 或 dm:2024-03..2024-06、path:明史、-path:草稿。"
+                     "regex=true 時整個檢索式（篩選詞除外）是正則表達式，漢字仍按 mode 簡繁異體互通。"
                      "返回每個文件的 id、路徑、頁數和帶頁碼的命中片段；query 為空時按篩選條件列出文件。"),
      "inputSchema": {"type": "object", "properties": {
          "query": {"type": "string", "description": "檢索詞"},
          "scope": {"type": "string", "enum": ["all", "content", "name"], "default": "all",
                    "description": "all＝名稱與全文（默認）；content＝只查全文；name＝只查文件名和文件夾名"},
          "mode": _MODE, "fuzzy": _FUZZY,
+         "regex": {"type": "boolean", "description": "把檢索式當作正則表達式（如 萬曆.{0,4}年），不能與 fuzzy 同用"},
          "folders": {"type": "array", "items": {"type": "string"},
                      "description": "只在這些文件夾（含子文件夾）裡檢索，絕對路徑"},
          "file_ids": {"type": "array", "items": {"type": "integer"}, "description": "只在這些文件裡檢索"},
@@ -82,6 +85,7 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": dict(_FILE, **{
          "query": {"type": "string", "description": "檢索詞（語法同 search）"},
          "mode": _MODE, "fuzzy": _FUZZY,
+         "regex": {"type": "boolean", "description": "把檢索詞當作正則表達式，不能與 fuzzy 同用"},
          "context": {"type": "integer", "minimum": 10, "maximum": 600, "default": 80,
                      "description": "命中前後各帶多少字"},
          "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 30, "description": "最多列出多少處"}}),
@@ -303,7 +307,9 @@ class Service(object):
         # 多覆核一些再排序截取：返回的是最好的 limit 個，而不只是最先覆核到的
         p = {"q": q, "mode": mode, "scope": scope, "sort": a.get("sort") or "relevance",
              "limit": min(200, max(60, limit * 3)), "budget": 10}
-        if fz:
+        if a.get("regex"):
+            p["re"] = "1"
+        elif fz:
             p["fuzzy"], p["sim"] = "1", str(fz)
         filt = []
         if a.get("folders"):
@@ -336,12 +342,15 @@ class Service(object):
             raise ToolError("請給出檢索詞（或至少一個篩選條件）")
         t0 = time.time()
         r = lib.search(p)
+        if r.get("re_error"):
+            raise ToolError(r["re_error"])
         dt = time.time() - t0
         items = r["items"][:limit]
         if q:
             n_all = len(r["items"])
             head = "檢索「%s」（%s%s · %s%s）：%s%d 項" % (
-                q, MODE_LABEL[mode], " · 模糊 ≥ %d%%" % round(fz * 100) if fz else "", SCOPE_LABEL[scope],
+                q, MODE_LABEL[mode], " · 正則" if a.get("regex") else " · 模糊 ≥ %d%%" % round(fz * 100) if fz else "",
+                SCOPE_LABEL[scope],
                 "；" + "，".join(filt) if filt else "", "至少 " if r.get("truncated") else "", n_all)
             if len(items) < n_all:
                 head += "，列出前 %d 項" % len(items)
@@ -350,7 +359,7 @@ class Service(object):
                 head += "，全文命中 %d 處" % hits
             head += "，%.1f 秒" % dt
             if r.get("truncated"):
-                head += "（未查完：可縮小範圍、提高相似度，或用 find_in_file 逐個文件查）"
+                head += "（未查完：可縮小範圍%s，或用 find_in_file 逐個文件查）" % ("、提高相似度" if fz and not a.get("regex") else "")
         else:
             n_all = r.get("total", len(r["items"]))
             head = "列出文件（%s，按%s）：共 %d 項" % ("，".join(filt), {
@@ -398,8 +407,11 @@ class Service(object):
         if not q:
             raise ToolError("請給出檢索詞")
         text = self._text(r)
-        mode, fz = _mode(a), _fuzzy(a)
-        spans, diffs, _ = lib.doc_hits(text, q, mode, fz, cap=5000, u16=False)
+        mode, fz, rx = _mode(a), _fuzzy(a), bool(a.get("regex"))
+        if rx:
+            lib.regex_compile(q, mode)          # 寫錯時拋出 UserError，作為工具錯誤返回
+            fz = None
+        spans, diffs, _ = lib.doc_hits(text, q, mode, fz, cap=5000, u16=False, rx=rx)
         merged = []
         for s, e in sorted(spans):
             if merged and s <= merged[-1][1]:

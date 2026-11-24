@@ -161,7 +161,7 @@ svg .fill { fill: currentColor; stroke: none; }
 .search { flex: 1; position: relative; display: flex; align-items: center; min-width: 200px; }
 .search-ic { position: absolute; left: 11px; width: 17px; height: 17px; color: var(--text-3); pointer-events: none; }
 #q {
-  width: 100%; height: 36px; padding: 0 100px 0 36px; border-radius: 10px;
+  width: 100%; height: 36px; padding: 0 130px 0 36px; border-radius: 10px;
   border: 1px solid var(--line-2); background: var(--panel); outline: none;
   font-size: 15px; box-shadow: var(--shadow-1); transition: border-color .15s, box-shadow .15s;
   user-select: text; -webkit-user-select: text;
@@ -170,7 +170,7 @@ svg .fill { fill: currentColor; stroke: none; }
 #q:focus { border-color: var(--accent); box-shadow: 0 0 0 3.5px var(--accent-soft); }
 #q::-webkit-search-cancel-button { display: none; }
 .q-clear {
-  position: absolute; right: 72px; width: 22px; height: 22px; border-radius: 11px; border: 0;
+  position: absolute; right: 102px; width: 22px; height: 22px; border-radius: 11px; border: 0;
   background: transparent; color: var(--text-3); display: grid; place-items: center;
 }
 .q-clear:hover { background: var(--line); color: var(--text); }
@@ -181,6 +181,22 @@ svg .fill { fill: currentColor; stroke: none; }
 }
 .q-hist:hover, .q-hist.on { background: var(--line); color: var(--text); }
 .q-hist svg { width: 15px; height: 15px; }
+/* 正則開關：檢索框裡的 .* */
+.q-re {
+  position: absolute; right: 72px; height: 22px; min-width: 26px; padding: 0 5px; border-radius: 6px; border: 0;
+  background: transparent; color: var(--text-3); font: 600 12.5px/22px var(--mono); letter-spacing: -.02em;
+}
+.q-re:hover { background: var(--line); color: var(--text); }
+.q-re.on { background: var(--accent); color: #fff; }
+.search.rx .search-ic { color: var(--accent); }
+/* 窗口窄時檢索框也窄：省掉 ⌘K 提示，給文字多留些地方 */
+@media (max-width: 1150px) {
+  .q-kbd { display: none; }
+  #q { padding-right: 98px; }
+  .q-hist { right: 8px; }
+  .q-re { right: 38px; }
+  .q-clear { right: 68px; }
+}
 /* 檢索歷史下拉 */
 .qpanel {
   position: absolute; left: 0; top: calc(100% + 6px); z-index: 60; max-height: min(62vh, 520px); overflow-y: auto;
@@ -431,6 +447,15 @@ mark, .h1, .h2 { color: inherit; border-radius: 2px; }
   padding: 1px 7px; font-variant-numeric: tabular-nums; font-weight: 600;
 }
 .fz-note { color: var(--fz); cursor: help; }
+.re-note { color: var(--accent); font: 600 11.5px var(--mono); cursor: help; }
+/* 檢索式裡的篩選詞（ext: size: dm: path:）：只讀的說明，刪掉檢索式裡的詞即取消 */
+.qfchip {
+  display: inline-flex; align-items: center; height: 22px; padding: 0 8px; border-radius: 11px; max-width: 240px;
+  border: 1px solid var(--accent-soft-2); color: var(--accent); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.qfchip.bad { border: 1px dashed #c0392b; color: #c0392b; background: transparent; cursor: pointer; font: 11.5px var(--mono); }
+.empty.re-err h3 { color: #c0392b; }
+.empty.re-err code { font: 13px var(--mono); background: var(--chrome-2); border-radius: 4px; padding: 2px 6px; word-break: break-all; }
 .fchip[data-only] > span { cursor: pointer; }
 .side-item.inscope { background: var(--accent-soft); box-shadow: inset 2.5px 0 0 var(--accent); }
 .more-btn {
@@ -632,6 +657,12 @@ mark, .h1, .h2 { color: inherit; border-radius: 2px; }
 }
 .find-fz:hover { color: var(--text); }
 .find-fz.on { color: var(--fz); border-color: var(--fz); background: var(--fz-soft); font-weight: 600; }
+.find-re {
+  flex: none; height: 26px; min-width: 30px; padding: 0 6px; border-radius: 7px; border: 1px solid var(--line-2); background: var(--panel);
+  color: var(--text-2); font: 600 12px var(--mono);
+}
+.find-re:hover { color: var(--text); }
+.find-re.on { color: #fff; border-color: var(--accent); background: var(--accent); }
 #find-sim { height: 26px; padding: 0 22px 0 8px; font-size: 12px; border-color: var(--fz); color: var(--fz); }
 #find-sim[hidden] { display: none; }
 .reader .trunc { margin-top: 24px; font: 12px var(--ui); color: var(--text-3); text-align: center; }
@@ -850,3 +881,36 @@ mark, .h1, .h2 { color: inherit; border-radius: 2px; }
 .tg > .tr.dir.open:hover { background: linear-gradient(rgba(120, 100, 70, .08), rgba(120, 100, 70, .08)), var(--panel); }
 .tg > .tr.dir.open.hit { background: linear-gradient(var(--accent-soft), var(--accent-soft)), var(--panel); }
 .tr.flash { box-shadow: inset 3px 0 0 var(--accent); }
+
+/* 檢索語法速查：工具欄 ? 下的面板（不彈窗） */
+.help-wrap { position: relative; flex: none; display: flex; }
+#help-btn.on { background: var(--accent-soft); color: var(--accent); }
+.synpanel {
+  position: absolute; right: -4px; top: calc(100% + 9px); z-index: 60; width: 480px; max-width: calc(100vw - 32px);
+  max-height: min(74vh, 620px); overflow-y: auto; overscroll-behavior: contain;
+  background: var(--panel); border: 1px solid var(--line-2); border-radius: 12px; box-shadow: var(--shadow-2);
+  padding: 0 8px 10px; animation: pop .12s ease-out; transform-origin: top right;
+}
+.synpanel[hidden] { display: none; }
+.syn-head {
+  position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 10px;
+  padding: 8px 0 8px 2px; background: var(--panel);
+}
+.syn-tabs button { height: 26px; padding: 0 14px; font-size: 12.5px; }
+.syn-hint { flex: 1; text-align: right; font-size: 11px; color: var(--text-3); white-space: nowrap; }
+.syn-head .icon-btn { width: 26px; height: 26px; }
+.syn-rows { display: flex; flex-direction: column; gap: 1px; }
+.syn-row {
+  display: grid; grid-template-columns: minmax(0, 44%) minmax(0, 1fr); gap: 14px; align-items: baseline; width: 100%;
+  border: 0; background: transparent; padding: 6px 8px; border-radius: 7px; text-align: left;
+  color: var(--text-2); font-size: 12.5px; line-height: 1.55;
+}
+.syn-row:hover { background: var(--sel); }
+.syn-row:hover .syn-ex { color: var(--accent-ink); }
+.syn-ex { font: 13px var(--mono); color: var(--accent); word-break: break-all; white-space: normal; }
+.syn-d code, .syn-note code { font: 11.5px var(--mono); background: var(--chrome-2); border-radius: 3px; padding: 0 3px; color: var(--text); }
+.syn-note { margin: 8px 8px 0; font-size: 11.5px; color: var(--text-3); line-height: 1.75; }
+.syn-note b { color: var(--accent); font-family: var(--mono); }
+.syn-foot { margin: 9px 8px 0; padding-top: 8px; border-top: 1px solid var(--line); font-size: 12px; }
+.syn-foot a { color: var(--text-3); text-decoration: none; }
+.syn-foot a:hover { color: var(--accent); }

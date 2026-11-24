@@ -72,6 +72,7 @@ DEFAULT_SETTINGS = {
     "find_fuzzy": "0",
     "find_sim": "0.7",
     "history_on": "1",
+    "regex": "0",
     "merge_dups": "1",
 }
 # 含這些文件的文件夾視為代碼項目，整個跳過
@@ -98,17 +99,19 @@ class UserError(Exception):
 
 # ======================================================================= 查詢解析
 def parse_query(q):
-    """空格=且，-詞=排除，"…"=短語，| 或 OR=或。返回 [{'neg':bool,'alts':[str]}]"""
+    """空格=且，-詞或 !詞=排除，"…"=短語，| 或 OR=或。返回 [{'neg':bool,'alts':[str]}]；
+    引號裡的詞另記在 'lit'，其中的 * ? 按字面匹配，不當通配符。"""
     toks = re.findall(r'-?"[^"]*"?|\S+', q)
     groups, pend_or = [], False
     for tok in toks:
         if tok in ("|", "OR", "或"):
             pend_or = True
             continue
-        neg = tok.startswith("-") and len(tok) > 1
+        neg = tok[:1] in ("-", "!") and len(tok) > 1
         if neg:
             tok = tok[1:]
-        if tok.startswith('"'):
+        lit = tok.startswith('"')
+        if lit:
             alts = [tok.strip('"')]
         else:
             alts = [a for a in tok.split("|")]
@@ -116,11 +119,239 @@ def parse_query(q):
         if not alts:
             continue
         if pend_or and groups and not neg and not groups[-1]["neg"]:
-            groups[-1]["alts"] += alts
+            g = groups[-1]
+            g["alts"] += alts
         else:
-            groups.append({"neg": neg, "alts": alts})
+            g = {"neg": neg, "alts": alts}
+            groups.append(g)
+        if lit:
+            g.setdefault("lit", []).extend(alts)
         pend_or = False
     return groups
+
+
+def is_wild(g, a):
+    """Everything 式通配符：* 任意幾個字（不跨句），? 一個字。引號裡的不算。"""
+    return ("*" in a or "?" in a) and a not in g.get("lit", ())
+
+
+# ---------------------------------------------------------------- 高級檢索：Everything 式的篩選詞
+# 寫在檢索式裡，與檢索詞並用（都要滿足）；只寫篩選、不寫詞，就按條件列出文件。
+#   ext:pdf;docx   -ext:json      size:>10mb  size:<500kb  size:1mb..20mb
+#   dm:2024  dm:2024-03  dm:2024-03-01..2024-06-30  dm:>2023  dm:today|yesterday|thisweek|lastweek|thismonth|
+#      lastmonth|thisyear|lastyear  dm:30d（最近 30 天）
+#   path:明史（完整路徑裡含這幾個字，簡繁異體互通）   -path:Codex
+QF_RE = re.compile(r'(?:(?<=\s)|^)([-!]?)(ext|size|dm|path):("[^"]*"|\S+)', re.I)
+_UNITS = {"": 1, "b": 1, "k": 1024, "kb": 1024, "m": 1024 ** 2, "mb": 1024 ** 2, "g": 1024 ** 3, "gb": 1024 ** 3}
+
+
+def _size_val(s):
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([kmg]?b?)\s*", s, re.I)
+    return int(float(m.group(1)) * _UNITS[m.group(2).lower()]) if m else None
+
+
+def _size_range(v):
+    """返回 [下限, 上限)（字節）；寫錯時 None。單寫一個大小 = 至少這麼大"""
+    if ".." in v:
+        a, b = v.split("..", 1)
+        lo, hi = _size_val(a) if a else 0, _size_val(b) if b else None
+        return None if (a and lo is None) or (b and hi is None) else (lo, hi + 1 if hi is not None else None)
+    m = re.fullmatch(r"(>=|<=|>|<|=)?(.+)", v)
+    op, x = m.group(1) or ">=", _size_val(m.group(2))
+    if x is None:
+        return None
+    return {">": (x + 1, None), ">=": (x, None), "<": (0, x), "<=": (0, x + 1), "=": (x, x + 1)}[op]
+
+
+_DM_ZH = {"today": "今天", "yesterday": "昨天", "thisweek": "本週", "lastweek": "上週", "thismonth": "本月",
+          "lastmonth": "上月", "thisyear": "今年", "lastyear": "去年"}
+_DM_ALIAS = dict([(v, k) for k, v in _DM_ZH.items()] + [("本周", "thisweek"), ("上周", "lastweek")])
+
+
+def _period(s, now=None):
+    """一個時間段 → [起, 止)（本地時間的時間戳）；不認得時 None。"""
+    import datetime as dt
+    s = s.strip().lower()
+    s = _DM_ALIAS.get(s, s)
+    today = dt.date.fromtimestamp(now or time.time())
+    ts = lambda d: time.mktime(d.timetuple())
+    mon = today - dt.timedelta(days=today.weekday())
+    first = today.replace(day=1)
+    prev_m = (first - dt.timedelta(days=1)).replace(day=1)
+    next_m = (first + dt.timedelta(days=32)).replace(day=1)
+    kw = {"today": (today, today + dt.timedelta(1)), "yesterday": (today - dt.timedelta(1), today),
+          "thisweek": (mon, mon + dt.timedelta(7)), "lastweek": (mon - dt.timedelta(7), mon),
+          "thismonth": (first, next_m), "lastmonth": (prev_m, first),
+          "thisyear": (dt.date(today.year, 1, 1), dt.date(today.year + 1, 1, 1)),
+          "lastyear": (dt.date(today.year - 1, 1, 1), dt.date(today.year, 1, 1))}
+    if s in kw:
+        a, b = kw[s]
+        return ts(a), ts(b)
+    m = re.fullmatch(r"(\d+)d", s)
+    if m:
+        return ts(today - dt.timedelta(int(m.group(1)) - 1)), ts(today + dt.timedelta(1))
+    m = re.fullmatch(r"(\d{4})(?:[-/.](\d{1,2})(?:[-/.](\d{1,2}))?)?", s)
+    if not m:
+        return None
+    try:
+        y, mo, d = int(m.group(1)), m.group(2), m.group(3)
+        if d:
+            a = dt.date(y, int(mo), int(d))
+            return ts(a), ts(a + dt.timedelta(1))
+        if mo:
+            a = dt.date(y, int(mo), 1)
+            return ts(a), ts((a + dt.timedelta(32)).replace(day=1))
+        return ts(dt.date(y, 1, 1)), ts(dt.date(y + 1, 1, 1))
+    except ValueError:
+        return None
+
+
+def _date_range(v):
+    if ".." in v:
+        a, b = v.split("..", 1)
+        pa, pb = _period(a) if a else (0, None), _period(b) if b else (None, None)
+        return None if pa is None or pb is None else (pa[0], pb[1])
+    m = re.fullmatch(r"(>=|<=|>|<)?(.+)", v)
+    op, per = m.group(1), _period(m.group(2))
+    if per is None:
+        return None
+    return {None: per, ">": (per[1], None), ">=": (per[0], None), "<": (0, per[0]), "<=": (0, per[1])}[op]
+
+
+def split_filters(q):
+    """從檢索式裡取出篩選詞 → (其餘的檢索式, 篩選參數, 寫錯的篩選詞列表)。篩選參數的 _desc 是給人看的說明。"""
+    f, bad, desc = {}, [], []
+
+    def take(m):
+        neg, key, val = m.group(1) in ("-", "!"), m.group(2).lower(), m.group(3).strip('"')
+        if not val:
+            bad.append(m.group(0).strip())
+            return " "
+        if key == "ext":
+            xs = [x.strip().lstrip(".").lower() for x in re.split(r"[;,|]", val) if x.strip()]
+            f.setdefault("q_noexts" if neg else "q_exts", []).extend("" if x == "-" else x for x in xs)
+            desc.append(("不含 " if neg else "類型 ") + "、".join(x if x != "-" else "無擴展名" for x in xs))
+        elif key == "path":
+            f.setdefault("path_out" if neg else "path_in", []).append(val)
+            desc.append("路徑%s「%s」" % ("不含" if neg else "含", val))
+        else:
+            r = _size_range(val) if key == "size" else _date_range(val)
+            if r is None:
+                bad.append(m.group(0).strip())
+            else:
+                v = re.sub(r"[^<>=.]+", lambda x: _DM_ZH.get(x.group(0).lower(), x.group(0)), val) if key == "dm" else val
+                desc.append(("大小 " if key == "size" else "修改於 ") + v.replace("..", " – ")
+                            .replace(">=", "≥ ").replace("<=", "≤ ").replace(">", "> ").replace("<", "< "))
+                k0, k1 = ("size_min", "size_max") if key == "size" else ("mt_min", "mt_max")
+                if r[0]:
+                    f[k0] = max(f.get(k0, 0), r[0])
+                if r[1] is not None:
+                    f[k1] = min(f.get(k1, r[1]), r[1])
+        return " "
+    rest = QF_RE.sub(take, q)
+    if desc:
+        f["_desc"] = desc
+    rest = re.sub(r"(?:(?<=\s)|^)[-!]?(?:ext|size|dm|path):(?=\s|$)", " ", rest, flags=re.I)   # 還沒寫完的篩選詞
+    return re.sub(r"\s+", " ", rest).strip(), f, bad
+
+
+_RE_ERR_ZH = [("unterminated character set", "方括號 [ 沒有閉合"), ("missing ), unterminated subpattern", "圓括號 ( 沒有閉合"),
+              ("unbalanced parenthesis", "多了一個 )"), ("nothing to repeat", "重複符號（* + ? {}）前面沒有可重複的字"),
+              ("multiple repeat", "重複符號連用了"), ("bad escape", "反斜杠 \\ 後面的寫法不認得"),
+              ("bad character range", "方括號裡的範圍寫反了"), ("unexpected end of pattern", "檢索式沒寫完"),
+              ("unknown extension", "(? 後面的寫法不認得"), ("look-behind requires fixed-width pattern", "後顧斷言要定長")]
+
+
+def _regex_error_zh(e):
+    msg = str(getattr(e, "msg", "") or e)
+    zh = next((z for en, z in _RE_ERR_ZH if msg.startswith(en)), msg)
+    pos = getattr(e, "pos", None)
+    return zh + ("（第 %d 個字附近）" % (pos + 1) if pos is not None else "")
+
+
+class _AllChars(object):
+    """正則的命中一律按普通命中高亮（不標異體）"""
+    def __contains__(self, x):
+        return True
+
+
+try:                                              # 正則的語法樹：取出必須出現的漢字，用全文索引預篩
+    from re import _parser as _sre_parse
+except ImportError:                               # Python 3.10 及以前
+    import sre_parse as _sre_parse
+
+
+def regex_required_runs(pattern):
+    """正則裡一定要出現的連續字面字符（如「萬曆.{0,4}年」→ 萬曆、年）；解析不了時 None。"""
+    P = _sre_parse
+
+    def runs(seq):
+        out, cur = [], []
+
+        def flush():
+            if cur:
+                out.append("".join(cur))
+                del cur[:]
+        for op, av in seq:
+            if op == P.LITERAL:
+                cur.append(chr(av))
+            elif op == P.SUBPATTERN:
+                flush()
+                out.extend(runs(av[-1]))
+            elif op in (P.MAX_REPEAT, P.MIN_REPEAT):
+                flush()
+                if av[0] >= 1:
+                    out.extend(runs(av[2]))
+            else:
+                flush()
+        flush()
+        return out
+    try:
+        return runs(P.parse(pattern))
+    except Exception:  # noqa
+        return None
+
+
+def regex_nested_repeat(pattern):
+    """重複套重複（如 (a+)+、(.*,){10}）：Python 的正則沒有超時，遇上不匹配的長文本會回溯到天荒地老，預先擋掉。
+    外層可重複不止一次、而裡面有無上限的重複時，返回 True（寧可多擋，改成 {1,20} 這樣有上限的即可）。"""
+    P = _sre_parse
+    BIG = 2
+
+    def unbounded(seq):
+        for op, av in seq:
+            if op in (P.MAX_REPEAT, P.MIN_REPEAT):
+                if av[1] == P.MAXREPEAT or unbounded(av[2]):
+                    return True
+            elif op == P.SUBPATTERN:
+                if unbounded(av[-1]):
+                    return True
+            elif op == P.BRANCH:
+                if any(unbounded(b) for b in av[1]):
+                    return True
+        return False
+
+    def bad(seq):
+        for op, av in seq:
+            if op in (P.MAX_REPEAT, P.MIN_REPEAT):
+                if (av[1] == P.MAXREPEAT or av[1] >= BIG) and unbounded(av[2]):
+                    return True
+                if bad(av[2]):
+                    return True
+            elif op == P.SUBPATTERN:
+                if bad(av[-1]):
+                    return True
+            elif op == P.BRANCH:
+                if any(bad(b) for b in av[1]):
+                    return True
+            elif op in (P.ASSERT, P.ASSERT_NOT):
+                if bad(av[1]):
+                    return True
+        return False
+    try:
+        return bad(P.parse(pattern))
+    except Exception:  # noqa
+        return False
 
 
 def align_boxes(seg, s, b):
@@ -336,7 +567,13 @@ class NameIndex(object):
             fids, dps = set(), set()
             for a in g["alts"]:
                 ft = fuzzy.get(a) if fuzzy else None
-                if ft is not None:
+                if is_wild(g, a):
+                    runs = re.findall(r"[^\W_]+", re.sub(r"[*?]", " ", a))
+                    if not runs:
+                        return None
+                    keys = [max(runs, key=len).translate(self.keytab)]     # 最長的一段一定原樣出現在名稱裡
+                    blobs = (self.f_blob, self.f_starts, self.d_blob, self.d_starts)
+                elif ft is not None:
                     keys = [pc for _, pc in fz_pieces(ft.q.translate(self.lib.norm.content_map("full")), ft.maxd)]
                     blobs = zblobs
                 else:
@@ -517,6 +754,9 @@ class Library(object):
             c.execute("PRAGMA journal_size_limit=33554432")   # WAL 檢查點後截回 32 MB 以內
             c.execute("PRAGMA foreign_keys=OFF")
             self.local.c = c
+        if not getattr(self.local, "fn", False):
+            c.create_function("tjn", 1, lambda s: self.norm.norm(s or "", "full").lower(), deterministic=True)
+            self.local.fn = True
         return c
 
     def setting(self, key):
@@ -1123,6 +1363,34 @@ class Library(object):
         self.regex_cache[key] = rx
         return rx
 
+    def wild_regex(self, a, level, cross):
+        """通配詞 → 正則。字面部分與普通檢索詞一樣（異體互通、容許換行斷開）；
+        * 是任意幾個字，但不越過句末標點（。！？；）、至多 120 字，免得一配就是一整段；? 是一個字（換行、空白不算）。"""
+        key = ("wild", a, level, cross)
+        rx = self.regex_cache.get(key)
+        if rx is not None or key in self.regex_cache:
+            return rx
+        out, lit, prev = [], False, None
+        for part in re.split(r"([*?])", a):
+            if not part:
+                continue
+            if part == "*":
+                out.append(r"[^。！？；!?;]{0,120}?")     # 有上限：幾個 * 連用時回溯不至於失控
+            elif part == "?":
+                out.append(r"[\s　]*[^\s　]")
+            else:
+                t = self.term_regex(part, level, cross)
+                if t is None:
+                    continue
+                if prev == "?":
+                    out.append(r"[\s　]*")
+                out.append(t.pattern)
+                lit = True
+            prev = part
+        rx = re.compile("".join(out)) if lit or "?" in a else None
+        self.regex_cache[key] = rx
+        return rx
+
     def fts_phrase(self, term):
         if not re.search(r"\w", term):
             return None
@@ -1263,6 +1531,21 @@ class Library(object):
             args.append(int(p["tag"]))
         if p.get("starred") in ("1", 1, True, "true"):
             where.append("f.starred=1")
+        # 檢索式裡的篩選詞（split_filters）
+        if p.get("q_exts"):
+            where.append("f.ext IN (%s)" % ",".join("?" * len(p["q_exts"])))
+            args += p["q_exts"]
+        if p.get("q_noexts"):
+            where.append("f.ext NOT IN (%s)" % ",".join("?" * len(p["q_noexts"])))
+            args += p["q_noexts"]
+        for k, sql in (("size_min", "f.size>=?"), ("size_max", "f.size<?"), ("mt_min", "f.mtime>=?"), ("mt_max", "f.mtime<?")):
+            if p.get(k) is not None and p.get(k) != "":
+                where.append(sql)
+                args.append(p[k])
+        for k, sql in (("path_in", "instr(tjn(f.path), ?)>0"), ("path_out", "instr(tjn(f.path), ?)=0")):
+            for v in p.get(k) or []:
+                where.append(sql)
+                args.append(self.norm.norm(v, "full").lower())
         return where, args
 
     def segs(self, text, spans, hl, base=None):
@@ -1300,8 +1583,92 @@ class Library(object):
             out.append([text[pos:], 0])
         return out
 
-    def _query(self, q, level, fz=None):
-        """檢索式 → Query。fz 為模糊檢索的相似度下限（None = 不模糊）；排除詞和太短的詞仍按原方式匹配。"""
+    def regex_compile(self, pattern, level):
+        """正則表達式：方括號外的漢字按匹配方式換成異體字類（萬 → [万萬]），不分大小寫，^ $ 按行。"""
+        key = ("re", pattern, level)
+        rx = self.regex_cache.get(key)
+        if rx is not None:
+            return rx
+        try:                                      # 先按原樣檢查一遍：報錯的位置對應用戶寫的檢索式
+            re.compile(pattern)
+        except re.error as e:
+            raise UserError("正則表達式有誤：%s" % _regex_error_zh(e))
+        if regex_nested_repeat(pattern):
+            raise UserError("正則表達式裡有重複套重複（如 (a+)+、(.*,){10}），遇到長文本會極慢。"
+                            "請改寫，如把裡層的 + * 改成 {1,20} 這樣有上限的")
+        out, i, cls = [], 0, False
+        while i < len(pattern):
+            ch = pattern[i]
+            if ch == "\\" and i + 1 < len(pattern):
+                out.append(pattern[i:i + 2])
+                i += 2
+                continue
+            if cls:
+                if ch == "]":
+                    cls = False
+                out.append(ch)
+            elif ch == "[":
+                cls = True
+                out.append(ch)
+                if pattern[i + 1:i + 2] == "^":
+                    out.append("^")
+                    i += 1
+                if pattern[i + 1:i + 2] == "]":     # 「[]…]」：開頭的 ] 是字面
+                    out.append("]")
+                    i += 1
+            elif is_cjk(ch):
+                out.append(self.char_class(ch, level))
+            else:
+                out.append(ch)
+            i += 1
+        try:
+            rx = re.compile("".join(out), re.I | re.M)
+        except re.error as e:
+            raise UserError("正則表達式有誤：%s" % e)
+        if len(self.regex_cache) > 500:
+            self.regex_cache.clear()
+        self.regex_cache[key] = rx
+        return rx
+
+    def wild_fts(self, a):
+        """通配詞的全文預篩：開頭那段可按詞前綴查，通配符之後的只取其中的漢字（索引按字切）。"""
+        parts, phs = re.split(r"([*?]+)", a), []
+        for k, part in enumerate(parts):
+            if not part or k % 2:
+                continue
+            pieces = [part] if k == 0 else re.findall("[%s]+" % CJK_RE_CLASS, part)
+            for piece in pieces:
+                ph = self.fts_phrase(piece)
+                if ph and ph not in phs:
+                    phs.append(ph)
+        return "(" + " AND ".join(phs) + ")" if phs else None
+
+    def regex_fts(self, pattern):
+        """正則裡一定要出現的漢字片段 → 全文索引的預篩式（只用漢字：索引按字切，任何片段都查得到）。"""
+        runs = regex_required_runs(pattern)
+        if not runs:
+            return None
+        phs = []
+        for r in runs:
+            for piece in re.findall("[%s]+" % CJK_RE_CLASS, r):
+                ph = self.fts_phrase(piece)
+                if ph and ph not in phs:
+                    phs.append(ph)
+        return " AND ".join(phs) or None
+
+    def _query(self, q, level, fz=None, rx=False):
+        """檢索式 → Query。fz 為模糊檢索的相似度下限（None = 不模糊）；排除詞和太短的詞仍按原方式匹配。
+        rx：整個檢索式（去掉篩選詞後）是一個正則表達式。"""
+        if isinstance(q, str):
+            q = split_filters(q)[0]
+        if rx:
+            Q = Query()
+            Q.groups = [{"neg": False, "alts": [q]}] if q else []
+            Q.level = level = level if level in Normalizer.LEVELS else "full"
+            Q.fz, Q.fuzzy, Q.neg = None, {}, []
+            Q.pos = [[self.regex_compile(q, level)]] if q else []
+            Q.qset, Q.qlev, Q.lmap = _AllChars(), None, self.norm.maps[level]
+            return Q
         Q = Query()
         Q.groups = parse_query(q.strip()) if isinstance(q, str) else q
         Q.level = level = level if level in Normalizer.LEVELS else "full"
@@ -1310,9 +1677,16 @@ class Library(object):
         cross = self.setting("cross_punct") == "1"
         cmap = self.norm.content_map(level) if fz else None
         Q.pos, Q.neg = [], []
+        wild = False
         for g in Q.groups:
             ms = []
             for a in g["alts"]:
+                if is_wild(g, a):
+                    rx = self.wild_regex(a, level, cross)
+                    if rx is not None:
+                        ms.append(rx)
+                        wild = wild or not g["neg"]
+                    continue
                 if fz and not g["neg"]:
                     ft = Q.fuzzy.get(a) or FuzzyTerm(a, cmap, fz, lambda ch, lv=level: self.char_class(ch, lv))
                     if ft.maxd > 0:
@@ -1328,6 +1702,8 @@ class Library(object):
         Q.qset = set(ex.get(ch, ch) for g in Q.groups if not g["neg"] for a in g["alts"] for ch in a)
         Q.lmap = self.norm.maps[level]
         Q.qlev = set(Q.lmap.get(ch, ch) for ch in Q.qset) if Q.fuzzy else None
+        if wild:                       # 通配符匹配到的字無從判斷是不是「異體」，統一按原字命中標
+            Q.qset, Q.qlev = _AllChars(), None
         return Q
 
     def _match_all(self, text, pos, neg, cap=3000, info=None, stop=None):
@@ -1443,12 +1819,32 @@ class Library(object):
         gen = str(p.get("gen") or "")
         if gen:
             self.search_gen = gen
+        rx = p.get("re") in ("1", 1, True, "true")
+        words, qf, bad = split_filters(q)
+        qdesc = qf.pop("_desc", None)
+        if qf:
+            p = dict(p)
+            p.update(qf)
+        if rx:
+            fz = None
         where, args = self._filters(p)
         c = self.conn()
         cols = "f.id, f.root_id, f.name, f.dir, f.ext, f.kind, f.size, f.mtime, f.starred, f.status," \
                " f.pages, f.chars, f.note"
-        groups = parse_query(q) if q else []
-        res = {"q": q, "mode": level, "fuzzy": fz, "variants": [], "items": [], "truncated": False}
+        groups = ([{"neg": False, "alts": [words]}] if rx else parse_query(words)) if words else []
+        res = {"q": q, "mode": level, "fuzzy": fz, "regex": rx, "variants": [], "items": [], "truncated": False}
+        if bad:
+            res["bad_filters"] = bad
+        if qdesc:
+            res["filters"] = qdesc
+        if rx and words:
+            try:
+                self.regex_compile(words, level)
+            except UserError as e:
+                res["re_error"] = str(e)        # 不用 "error"：那是請求失敗的約定
+                res["total"] = 0
+                res["took"] = round(_now() - t0, 3)
+                return res
         if not groups:
             order = {"name": "f.name COLLATE NOCASE ASC", "size": "f.size DESC",
                      "mtime_asc": "f.mtime ASC"}.get(sort, "f.mtime DESC")
@@ -1464,7 +1860,7 @@ class Library(object):
             return res
 
         seen_chars = []
-        for g in groups:
+        for g in ([] if rx else groups):
             if g["neg"]:
                 continue
             for a in g["alts"]:
@@ -1472,7 +1868,7 @@ class Library(object):
                     if is_cjk(ch) and ch not in seen_chars:
                         seen_chars.append(ch)
         res["variants"] = [self.norm.group_info(ch) for ch in seen_chars[:24]]
-        Q = self._query(groups, level, fz)
+        Q = self._query(words if rx else groups, level, fz, rx=rx)
         pos, neg = Q.pos, Q.neg
         res["fuzzy_terms"] = [{"term": a, "chars": ft.m, "errors": ft.maxd} for a, ft in Q.fuzzy.items()]
         if not pos:
@@ -1483,7 +1879,7 @@ class Library(object):
         # ---- 文件名（先在常駐內存的歸一化名稱表裡預篩，再用正則覆核）
         dcand = None
         if scope in ("all", "name"):
-            cand = None if cross else self.names.candidates(groups, Q.fuzzy)
+            cand = None if cross or rx else self.names.candidates(groups, Q.fuzzy)
             if cand is None:
                 sql = "SELECT %s FROM files f %s" % (cols, ("WHERE " + " AND ".join(where)) if where else "")
                 rows = c.execute(sql, args)
@@ -1503,7 +1899,7 @@ class Library(object):
                     found[r["id"]] = it
         # ---- 文件夾名
         if scope in ("all", "name") and not p.get("kind") and not p.get("kinds") and not p.get("exts") and \
-                not p.get("tag") and \
+                not p.get("tag") and not qf and \
                 p.get("starred") not in ("1", 1, True, "true"):
             for it in self._match_folders(c, p, Q, dcand):
                 found[it["id"]] = it
@@ -1514,10 +1910,10 @@ class Library(object):
             return _now() - t0 > budget or bool(gen and self.search_gen != gen)
         if scope in ("all", "content"):
             fts_pos = []
-            for g in groups:
+            for g in ([] if rx else groups):
                 if g["neg"]:
                     continue
-                phs = [self.fts_phrase(a) for a in g["alts"]]
+                phs = [self.wild_fts(a) if is_wild(g, a) else self.fts_phrase(a) for a in g["alts"]]
                 if any(ph is None for ph in phs):
                     continue        # 純標點，FTS 無法表達，交由正則覆核
                 fts_pos.append("(" + " OR ".join(phs) + ")")
@@ -1525,12 +1921,20 @@ class Library(object):
             if fts_q and level == "full":
                 for g in groups:
                     if g["neg"]:
-                        phs = [self.fts_phrase(a) for a in g["alts"]]
+                        phs = [self.fts_phrase(a) for a in g["alts"] if not is_wild(g, a)]
                         phs = [x for x in phs if x]
                         if phs:
                             fts_q += " NOT (" + " OR ".join(phs) + ")"
             cand = None
-            if Q.fuzzy:
+            if rx:
+                fts_q = self.regex_fts(words)
+            if (rx or any(is_wild(g, a) for g in groups if not g["neg"] for a in g["alts"])) and not Q.fuzzy:
+                if not fts_q:                     # 沒有一定出現的字可預篩：逐個文件掃（有時間上限）
+                    cand = c.execute("SELECT %s FROM files f WHERE f.status=1 %s ORDER BY f.mtime DESC LIMIT 20000" % (
+                        cols, (" AND " + " AND ".join(where)) if where else ""), args).fetchall()
+            if cand is not None:
+                pass
+            elif Q.fuzzy:
                 cand = self._fuzzy_candidates(c, Q, cols, where, args)
             elif fts_q:
                 sql = ("SELECT %s, bm25(fts) AS rank FROM fts JOIN files f ON f.id=fts.rowid "
@@ -1688,7 +2092,7 @@ class Library(object):
     # 「恢復默認設置」會重置的項；自定義異體字與排除列表另行勾選
     RESETTABLE = ("cross_punct", "rescan_minutes", "watch", "skip_projects", "code_fulltext", "mode", "scope",
                   "sort", "collation", "sidebar_w", "list_w", "folder_view", "fuzzy", "fuzzy_sim",
-                  "reader_size", "find_fuzzy", "find_sim", "history_on", "merge_dups")
+                  "reader_size", "find_fuzzy", "find_sim", "history_on", "merge_dups", "regex")
 
     def reset_settings(self, variants=False, excludes=False):
         keys = list(self.RESETTABLE) + (["custom_variants"] if variants else []) + (["excludes"] if excludes else [])
@@ -1711,9 +2115,12 @@ class Library(object):
     def set_collation(self, name):
         self.coll = Collator(name or system_collation())
 
-    def _name_matcher(self, q, level, fz=None):
-        """返回 match(name) -> segs 或 None；q 為空時返回 None。"""
-        Q = self._query(q or "", level, fz)
+    def _name_matcher(self, q, level, fz=None, rx=False):
+        """返回 match(name) -> segs 或 None；q 為空（或正則寫錯）時返回 None。"""
+        try:
+            Q = self._query(q or "", level, fz, rx=rx)
+        except UserError:
+            return None
         if not Q.groups or not Q.pos:
             return None
 
@@ -1736,7 +2143,7 @@ class Library(object):
             rows = rows[:limit]
         return [self._item(r) for r in rows]
 
-    def folder(self, path, q="", level="full", fz=None):
+    def folder(self, path, q="", level="full", fz=None, rx=False):
         """文件夾預覽：整棵子樹的文件夾結構（每層附遞歸統計），文件淺層優先帶回；名稱命中檢索詞的標出。"""
         path = os.path.realpath(path).rstrip("/")
         c = self.conn()
@@ -1771,7 +2178,7 @@ class Library(object):
         partial_root = path not in loaded
         if partial_root:                       # 本層文件就超過上限：只帶前一部分
             files = self._dir_files(c, [path], limit=self.TREE_BUDGET)
-        match = self._name_matcher(q, level, fz)
+        match = self._name_matcher(q, level, fz, rx)
         nmatch = 0
         if match:
             have = set(f["id"] for f in files)
@@ -1814,14 +2221,14 @@ class Library(object):
                 "loaded": not partial_root, "matches": nmatch, "q": q or "",
                 "exists": os.path.isdir(path), "tags": []}
 
-    def folder_files(self, path, q="", level="full", fz=None):
+    def folder_files(self, path, q="", level="full", fz=None, rx=False):
         """展開文件夾時補載它的直接文件。"""
         path = os.path.realpath(path).rstrip("/")
         c = self.conn()
         if self.root_for(path, c.execute("SELECT id, path FROM roots").fetchall()) is None:
             raise UserError("文件夾不在資料庫中")
         files = self._dir_files(c, [path], limit=5000)
-        match = self._name_matcher(q, level, fz)
+        match = self._name_matcher(q, level, fz, rx)
         if match:
             for f in files:
                 sg = match(f["name"])
@@ -2315,10 +2722,13 @@ class Library(object):
                                       % ",".join("?" * len(chunk)), chunk):
                 m[fid]["tags"].append(tid)
 
-    def doc_hits(self, text, q, level, fz=None, cap=20000, u16=True):
-        """單個文件內的命中：(區間, 模糊命中裡與檢索詞不同的字的位置, 檢索字集)。
+    def doc_hits(self, text, q, level, fz=None, cap=20000, u16=True, rx=False):
+        """單個文件內的命中：(區間, 模糊命中裡與檢索詞不同的字的位置, 檢索字集；正則時為 "*")。
         u16=True 時下標按 UTF-16 計（給瀏覽器用），否則按 Python 碼位。"""
-        Q = self._query(q, level, fz)
+        try:
+            Q = self._query(q, level, fz, rx=rx)
+        except UserError:
+            return [], [], "*"
         spans, ctx = [], {}
         t_end = _now() + 20.0              # 極長的檢索詞配極低的相似度時，最多算 20 秒
 
@@ -2348,26 +2758,34 @@ class Library(object):
         if conv:
             spans = [(conv(a), conv(b)) for a, b in spans]
             diffs = [conv(i) for i in diffs]
-        return spans, diffs, "".join(sorted(Q.qset))
+        return spans, diffs, "*" if isinstance(Q.qset, _AllChars) else "".join(sorted(Q.qset))
 
-    def find_in(self, fid, q, level, fz=None):
+    def find_in(self, fid, q, level, fz=None, rx=False):
         """「在本文件內查找」：只返回命中位置，不重傳全文。"""
         self.last_use = _now()
         text = self.get_text(fid)
         if text is None or not (q or "").strip():
             return {"spans": [], "diffs": [], "qchars": ""}
-        spans, diffs, qchars = self.doc_hits(text, q, level, fz)
+        if rx:
+            try:
+                self.regex_compile(q, level)
+            except UserError as e:
+                return {"spans": [], "diffs": [], "qchars": "*", "re_error": str(e)}
+        spans, diffs, qchars = self.doc_hits(text, q, level, fz, rx=rx)
         return {"spans": spans, "diffs": diffs, "qchars": qchars}
 
-    def contexts(self, fid, q, level, fz=None, limit=500, before=30, after=46):
+    def contexts(self, fid, q, level, fz=None, limit=500, before=30, after=46, rx=False):
         """一個文件裡全部命中的上下文（結果列表裡「全部 N 處」用）：挨得近的命中併成一條，兩頭省略號。"""
         self.last_use = _now()
         text = self.get_text(fid)
         if text is None or not (q or "").strip():
             return {"total": 0, "items": [], "capped": False}
-        Q = self._query(q, level, fz)
+        try:
+            Q = self._query(q, level, fz, rx=rx)
+        except UserError:
+            return {"total": 0, "items": [], "capped": False}
         merged = []
-        for s, e in self.doc_hits(text, q, level, fz, u16=False)[0]:
+        for s, e in self.doc_hits(text, q, level, fz, u16=False, rx=rx)[0]:
             if merged and s <= merged[-1][1]:
                 merged[-1] = (merged[-1][0], max(e, merged[-1][1]))
             else:
@@ -2404,7 +2822,7 @@ class Library(object):
                           "page": bisect.bisect_right(page_starts, s0) if page_starts else None})
         return {"total": len(merged), "items": items, "capped": capped}
 
-    def preview(self, fid, q, level, max_chars=4000000, fz=None):
+    def preview(self, fid, q, level, max_chars=4000000, fz=None, rx=False):
         self.last_use = _now()
         c = self.conn()
         r = c.execute("SELECT * FROM files WHERE id=?", (fid,)).fetchone()
@@ -2424,7 +2842,7 @@ class Library(object):
         if text is not None:
             diffs = []
             if q and q.strip():
-                spans, diffs, it["qchars"] = self.doc_hits(text, q, level, fz)
+                spans, diffs, it["qchars"] = self.doc_hits(text, q, level, fz, rx=rx)
             if len(text) > max_chars:
                 text = text[:max_chars]
                 lim = len(text.encode("utf-16-le")) // 2

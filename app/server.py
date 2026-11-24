@@ -250,7 +250,7 @@ class Handler(BaseHTTPRequestHandler):
         return App.lib.search(p)
 
     def api_preview(self, p, b):
-        return App.lib.preview(int(p["id"]), p.get("q", ""), p.get("mode", "full"), fz=fuzzy_param(p))
+        return App.lib.preview(int(p["id"]), p.get("q", ""), p.get("mode", "full"), fz=fuzzy_param(p), rx=p.get("re") == "1")
 
     def api_searches(self, p, b):
         return App.lib.searches()
@@ -281,10 +281,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_contexts(self, p, b):
         lim = max(1, min(5000, int(p.get("limit") or 500)))
-        return App.lib.contexts(int(p["id"]), p.get("q", ""), p.get("mode", "full"), fuzzy_param(p), limit=lim)
+        return App.lib.contexts(int(p["id"]), p.get("q", ""), p.get("mode", "full"), fuzzy_param(p), limit=lim,
+                                rx=p.get("re") == "1")
 
     def api_find(self, p, b):
-        return App.lib.find_in(int(p["id"]), p.get("q", ""), p.get("mode", "full"), fuzzy_param(p))
+        return App.lib.find_in(int(p["id"]), p.get("q", ""), p.get("mode", "full"), fuzzy_param(p), rx=p.get("re") == "1")
 
     def api_variants(self, p, b):
         return {"chars": App.lib.variants(p.get("q", ""))}
@@ -338,10 +339,11 @@ class Handler(BaseHTTPRequestHandler):
         return {"ok": True}
 
     def api_folder(self, p, b):
-        return App.lib.folder(p.get("path", ""), p.get("q", ""), p.get("mode", "full"), fuzzy_param(p))
+        return App.lib.folder(p.get("path", ""), p.get("q", ""), p.get("mode", "full"), fuzzy_param(p), rx=p.get("re") == "1")
 
     def api_folder_files(self, p, b):
-        return App.lib.folder_files(p.get("path", ""), p.get("q", ""), p.get("mode", "full"), fuzzy_param(p))
+        return App.lib.folder_files(p.get("path", ""), p.get("q", ""), p.get("mode", "full"), fuzzy_param(p),
+                                    rx=p.get("re") == "1")
 
     def api_open_path(self, p, b):
         path = os.path.realpath(b.get("path", ""))
@@ -421,7 +423,7 @@ class Handler(BaseHTTPRequestHandler):
 
 SETTING_KEYS = ("custom_variants", "excludes", "cross_punct", "rescan_minutes", "watch", "skip_projects",
                 "code_fulltext", "mode", "scope", "sidebar_w", "list_w", "sort", "collation", "folder_view",
-                "fuzzy", "fuzzy_sim", "reader_size", "find_fuzzy", "find_sim", "history_on", "merge_dups")
+                "fuzzy", "fuzzy_sim", "reader_size", "find_fuzzy", "find_sim", "history_on", "merge_dups", "regex")
 
 
 class Server(ThreadingHTTPServer):

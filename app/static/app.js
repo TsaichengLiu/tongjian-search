@@ -48,7 +48,7 @@ const S = {
   token: window.TJ.token, native: window.TJ.native,
   roots: [], tags: [], stats: {}, status: {}, settings: {}, meta: {}, tools: {},
   q: '', mode: 'full', scope: 'name', sort: 'relevance', limit: 200, projects: [],
-  fuzzy: false, fzSim: '0.7', find: { open: false, q: '', res: null, busy: false, fz: false, sim: '0.7' },
+  fuzzy: false, fzSim: '0.7', regex: false, synTab: 'basic', find: { open: false, q: '', res: null, busy: false, fz: false, re: false, sim: '0.7' },
   filter: { root: null, dir: null, kind: null, tag: null, starred: false, only: null, kinds: [], exts: [] },
   openDups: new Set(), searches: { history: [], saved: [] }, dupView: false, dupData: null, dupKeep: {}, dupCount: null,
   openKinds: new Set(),
@@ -74,7 +74,7 @@ async function api(path, body) {
 }
 const rawUrl = (id, hash = '') => `/raw/${id}?t=${encodeURIComponent(S.token)}${hash}`;
 const thumbUrl = id => `/thumb/${id}?t=${encodeURIComponent(S.token)}`;
-const fzQS = () => (S.fuzzy ? `&fuzzy=1&sim=${S.fzSim}` : '');
+const fzQS = () => (S.regex ? '&re=1' : S.fuzzy ? `&fuzzy=1&sim=${S.fzSim}` : '');
 // 幾乎沒有文字層（多為掃描件）：至少 20 頁、平均每頁不到 20 個字符。與後台的 NEAR_EMPTY_SQL 一致
 const nearEmpty = it => it.kind === 'pdf' && (it.status === 2 ||
   (it.status === 1 && (it.pages || 0) >= 20 && (it.chars || 0) < it.pages * 20));
@@ -572,7 +572,8 @@ async function runSearch(opt = {}) {
   if (S.dupView) return loadDups();
   const seq = ++searchSeq;
   const p = new URLSearchParams({ q: S.q, mode: S.mode, scope: S.scope, sort: S.sort, limit: S.limit, gen: seq });
-  if (S.fuzzy) { p.set('fuzzy', 1); p.set('sim', S.fzSim); }
+  if (S.regex) p.set('re', 1);
+  else if (S.fuzzy) { p.set('fuzzy', 1); p.set('sim', S.fzSim); }
   filterParams(p);
   S.loading = true;
   const slow = setTimeout(() => { if (seq === searchSeq) renderResHead(); }, 250);
@@ -581,7 +582,7 @@ async function runSearch(opt = {}) {
   clearTimeout(slow);
   if (seq !== searchSeq) return;
   S.loading = false;
-  const qChanged = !S.res || S.res.q !== r.q || S.res.mode !== r.mode || S.res.fuzzy !== r.fuzzy;
+  const qChanged = !S.res || S.res.q !== r.q || S.res.mode !== r.mode || S.res.fuzzy !== r.fuzzy || !S.res.regex !== !r.regex;
   S.res = r;
   buildItems();
   if (r.q) noteSearch(); else clearTimeout(histTimer);
@@ -636,6 +637,7 @@ function renderResHead() {
           : '檢索詞都不足 3 字（或相似度設得太高），按原方式匹配';
         h += `<span class="fz-note" title="${esc(tip)}">≈ ${ft.length ? '模糊 ≥ ' + Math.round(r.fuzzy * 100) + '%' : '詞太短，未模糊'}</span>`;
       }
+      if (r.regex) h += `<span class="re-note" title="整個檢索式（篩選詞以外）按正則表達式匹配；漢字仍按匹配方式互通">.* 正則</span>`;
     } else {
       h += `<span><b>${fmtNum(r.total)}</b> 個文件${r.merged ? `<span class="dup-note">（本頁合併 ${fmtNum(r.merged)} 個副本）</span>` : ''}</span>`;
     }
@@ -649,6 +651,10 @@ function renderResHead() {
   if (f.tag) { const t = S.tags.find(t => t.id === f.tag); chips.push(['tag', '#' + (t ? t.name : '')]); }
   if (f.starred) chips.push(['starred', '已收藏']);
   if (f.only) chips.push(['only', '範圍：' + onlyLabel(f.only)]);
+  if (!S.dupView && r) {
+    for (const d of r.filters || []) h += `<span class="qfchip" title="檢索式裡的篩選詞">${esc(d)}</span>`;
+    for (const b of r.bad_filters || []) h += `<button class="qfchip bad" data-syn="filter" title="這個篩選詞看不懂，已忽略——點擊看寫法">${esc(b)} ？</button>`;
+  }
   h += chips.map(([k, l]) => `<span class="fchip"${k === 'only' ? ' data-only title="只在這些文件／文件夾中檢索（點擊查看）"' : ''}><span>${esc(l)}</span><button data-clear="${k}" title="${k === 'dups' ? '退出查重' : '取消篩選'}">${I.x}</button></span>`).join('');
   if (!S.dupView && (S.q.trim() || hasFilter())) {
     const sv = S.searches.saved.find(isCurrentSearch);
@@ -657,6 +663,8 @@ function renderResHead() {
   $('#res-head').innerHTML = h;
 }
 $('#res-head').addEventListener('click', e => {
+  const sy = e.target.closest('[data-syn]');
+  if (sy) return openSyn(sy.dataset.syn);
   const b = e.target.closest('[data-clear]');
   const oc = e.target.closest('[data-only]');
   if (oc && !b) return onlyMenu(oc);
@@ -727,10 +735,14 @@ function renderResults() {
   if (S.dupView) return renderDupView(list);
   if (!S.items.length) {
     const r = S.res;
-    if (r && r.q) {
+    if (r && r.re_error) {
+      list.innerHTML = `<div class="empty re-err">${I.search.replace('<svg', '<svg class="big-ic"')}<h3>${esc(r.re_error)}</h3>
+        <p><code>${esc(r.q)}</code></p>
+        <p>改一改檢索式，或關掉檢索框裡的「<a href="#" data-regex-off>.*</a>」按普通詞檢索 · <a href="#" data-syn="regex">正則寫法</a></p></div>`;
+    } else if (r && r.q) {
       list.innerHTML = `<div class="empty">${I.search.replace('<svg', '<svg class="big-ic"')}<h3>沒有找到「${esc(r.q)}」</h3>
         ${S.mode !== 'full' ? `<p>試試切換到「<a href="#" data-mode-to="full">異體</a>」模式</p>` : ''}
-        ${!S.fuzzy ? `<p>或開啟「<a href="#" data-fuzzy-on>模糊</a>」，容許脫字、訛字</p>` : ''}
+        ${!S.fuzzy && !S.regex ? `<p>或開啟「<a href="#" data-fuzzy-on>模糊</a>」，容許脫字、訛字</p>` : ''}
         ${S.scope !== 'all' ? '<p>或把範圍改為「名稱與全文」</p>' : ''}
         ${hasFilter() ? '<p>或取消上方的篩選條件</p>' : ''}
         ${S.status.busy ? '<p>索引尚未完成，稍後結果會更多</p>' : ''}</div>`;
@@ -804,6 +816,9 @@ $('#res-list').addEventListener('click', e => {
   const mt = e.target.closest('[data-mode-to]');
   if (mt) { e.preventDefault(); return setMode(mt.dataset.modeTo); }
   if (e.target.closest('[data-fuzzy-on]')) { e.preventDefault(); return setFuzzy(true); }
+  if (e.target.closest('[data-regex-off]')) { e.preventDefault(); return setRegex(false); }
+  const sy = e.target.closest('[data-syn]');
+  if (sy) { e.preventDefault(); return openSyn(sy.dataset.syn); }
   const el = e.target.closest('.item');
   if (!el) return;
   const id = +el.dataset.id;
@@ -2534,6 +2549,8 @@ function mergeSpans(spans) {
   }
   return out;
 }
+// 檢索字集：正則、通配符檢索時服務器給 "*"——命中的字無從判斷是不是異體，一律按原字命中標
+const qsetOf = qc => (qc === '*' ? null : new Set(Array.from(qc || '')));
 function fillMark(m, str, qset, base, diffs) {
   // 命中裡字形與檢索詞不同的字：v = 異體，x = 模糊匹配中與檢索詞不同的字（diffs 為 UTF-16 下標）
   let run = '', runK = null, i = base;
@@ -2544,7 +2561,7 @@ function fillMark(m, str, qset, base, diffs) {
     run = '';
   };
   for (const ch of str) {
-    const k = diffs && diffs.has(i) ? 'x' : (isWordChar(ch) && !qset.has(exNorm(ch)) ? 'v' : '');
+    const k = diffs && diffs.has(i) ? 'x' : (qset && isWordChar(ch) && !qset.has(exNorm(ch)) ? 'v' : '');
     if (runK !== null && k !== runK) flush();
     runK = k;
     run += ch;
@@ -2553,8 +2570,8 @@ function fillMark(m, str, qset, base, diffs) {
   flush();
 }
 function findActive() { return S.find.open && !!S.find.q.trim(); }
-const findKey = () => [S.find.q.trim(), S.mode, S.find.fz ? S.find.sim : ''].join('\u0001');
-const findFzQS = () => (S.find.fz ? `&fuzzy=1&sim=${S.find.sim}` : '');
+const findKey = () => [S.find.q.trim(), S.mode, S.find.re ? 're' : S.find.fz ? S.find.sim : ''].join('\u0001');
+const findFzQS = () => (S.find.re ? '&re=1' : S.find.fz ? `&fuzzy=1&sim=${S.find.sim}` : '');
 function findReady() { const r = S.find.res; return !!(r && S.pv && r.id === S.pv.id && r.key === findKey()); }
 function renderReader(body) {
   const pv = S.pv;
@@ -2563,9 +2580,10 @@ function renderReader(body) {
     return;
   }
   body.innerHTML = `<div class="findbar" id="findbar"${S.find.open ? '' : ' hidden'}>${I.search}
-    <input id="find-q" type="text" spellcheck="false" autocomplete="off" placeholder="在本文件內查找 —— 簡繁異體互通" value="${esc(S.find.q)}">
-    <button class="find-fz${S.find.fz ? ' on' : ''}" data-act="find-fz" title="模糊查找：容許脫字、衍字、訛字（只管本文件內查找，與上方檢索框的「模糊」互不影響）">≈ 模糊</button>
-    <select id="find-sim" title="相似度下限"${S.find.fz ? '' : ' hidden'}>${['0.9', '0.8', '0.7', '0.6', '0.5'].map(v =>
+    <input id="find-q" type="text" spellcheck="false" autocomplete="off" placeholder="${S.find.re ? '正則表達式 —— 漢字仍簡繁異體互通' : '在本文件內查找 —— 簡繁異體互通'}" value="${esc(S.find.q)}">
+    <button class="find-re${S.find.re ? ' on' : ''}" data-act="find-re" title="正則表達式（只管本文件內查找）">.*</button>
+    <button class="find-fz${S.find.fz && !S.find.re ? ' on' : ''}" data-act="find-fz" title="模糊查找：容許脫字、衍字、訛字（只管本文件內查找，與上方檢索框的「模糊」互不影響）">≈ 模糊</button>
+    <select id="find-sim" title="相似度下限"${S.find.fz && !S.find.re ? '' : ' hidden'}>${['0.9', '0.8', '0.7', '0.6', '0.5'].map(v =>
       `<option value="${v}"${v === S.find.sim ? ' selected' : ''}>≥ ${Math.round(v * 100)}%</option>`).join('')}</select>
     <span class="find-mode" id="find-mode" title="匹配方式跟隨上方的精確／簡繁／異體"></span>
     <button class="icon-btn" data-act="find-close" title="關閉查找（esc）">${I.x}</button></div>
@@ -2587,7 +2605,7 @@ function paintReader() {
   S.hit = 0;
   reader.textContent = '';
   const paged = pv.text.indexOf('\f') >= 0;
-  const text = pv.text, qset = new Set(Array.from(src.qchars || ''));
+  const text = pv.text, qset = qsetOf(src.qchars);
   const blocks = [];
   if (paged) {
     let a = 0, page = 1;
@@ -2697,7 +2715,7 @@ function remarkReader() {
   if (!pv || !reader || pv.text == null || !S.rb || !reader.contains(S.rb[0] && S.rb[0].el)) return paintReader();
   const src = findActive() ? (findReady() ? S.find.res : { spans: [], diffs: [], qchars: '' }) : pv;
   const spans = mergeSpans(src.spans), old = S.spans || [];
-  const ctx = { text: pv.text, qset: new Set(Array.from(src.qchars || '')),
+  const ctx = { text: pv.text, qset: qsetOf(src.qchars),
     diffs: src.diffs && src.diffs.length ? new Set(src.diffs) : null, canOrig: canOrigPv(pv) };
   const hits = (list, a, b) => {
     let lo = 0, hi = list.length;
@@ -2752,7 +2770,7 @@ async function runFind() {
   try {
     const r = await api(`find?id=${pv.id}&q=${encodeURIComponent(S.find.q)}&mode=${S.mode}${findFzQS()}`);
     if (seq !== findSeq || !S.pv || S.pv.id !== pv.id) return;
-    S.find.res = { id: pv.id, key, spans: r.spans, diffs: r.diffs, qchars: r.qchars };
+    S.find.res = { id: pv.id, key, spans: r.spans, diffs: r.diffs, qchars: r.qchars, error: r.re_error };
     S.find.busy = false;
     remarkReader();
   } catch (e) {
@@ -2793,7 +2811,7 @@ function renderHitbar() {
   if (!hb) return;
   const n = S.hitEls.length, pv = S.pv, fa = findActive();
   const page = n ? curPage() : null;
-  const msg = fa ? (S.find.busy || !findReady() ? '查找中…' : '本文件內沒有找到')
+  const msg = fa ? (S.find.busy || !findReady() ? '查找中…' : S.find.res.error ? esc(S.find.res.error) : '本文件內沒有找到')
     : `${fmtNum(pv.chars)} 字${pv.pages ? ' · ' + pv.pages + ' 頁' : ''}${S.q ? ' · 正文無命中' : ''}`;
   hb.innerHTML = `${n ? `<span>${fa ? '查找：' : ''}第 <b>${S.hit + 1}</b> / ${fmtNum(n)} 處</span>
     <button class="icon-btn" data-act="prev-hit" title="上一處（⇧⌘G）">${I.up}</button>
@@ -2910,12 +2928,16 @@ $('#preview').addEventListener('click', async e => {
     case 'oh-prev': return origHit(-1);
     case 'oh-next': return origHit(1);
     case 'dv-zout': return DV && dvZoom(DV.zi - 1);
-    case 'find-fz': {
-      S.find.fz = !S.find.fz;
-      b.classList.toggle('on', S.find.fz);
+    case 'find-fz': case 'find-re': {
+      // 本文件內查找的「正則」只在這次打開通檢時有效；與模糊互斥
+      if (b.dataset.act === 'find-re') { S.find.re = !S.find.re; if (S.find.re && S.find.fz) { S.find.fz = false; api('settings', { find_fuzzy: '0' }).catch(() => {}); } }
+      else { S.find.fz = !(S.find.fz && !S.find.re); S.find.re = false; api('settings', { find_fuzzy: S.find.fz ? '1' : '0' }).catch(() => {}); }
+      const fb = $('#findbar');
+      $('.find-fz', fb).classList.toggle('on', S.find.fz);
+      $('.find-re', fb).classList.toggle('on', S.find.re);
+      $('#find-q').placeholder = S.find.re ? '正則表達式 —— 漢字仍簡繁異體互通' : '在本文件內查找 —— 簡繁異體互通';
       const sl = $('#find-sim');
       if (sl) sl.hidden = !S.find.fz;
-      api('settings', { find_fuzzy: S.find.fz ? '1' : '0' }).catch(() => {});
       if (findActive()) runFind();
       return $('#find-q') && $('#find-q').focus();
     }
@@ -2989,10 +3011,11 @@ function onQuery() {
   if (S.q.trim()) closeQPanel();
   $('#q-clear').hidden = !S.q;
   S.limit = 200;
-  scheduleSearch(S.q.trim() ? (S.fuzzy && S.scope !== 'name' ? 450 : 260) : 60);
+  scheduleSearch(S.q.trim() ? ((S.fuzzy || S.regex) && S.scope !== 'name' ? 450 : 260) : 60);
 }
 qEl.addEventListener('keydown', e => {
   if (e.isComposing || composing) return;
+  if (e.key === 'Escape' && synOpen()) { e.preventDefault(); e.stopPropagation(); return closeSyn(); }
   if (qpOpen()) {
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); return qpMove(e.key === 'ArrowDown' ? 1 : -1); }
     if (e.key === 'Enter' && qpIdx >= 0) {
@@ -3019,7 +3042,87 @@ function setMode(m) {
 $('#mode').addEventListener('click', e => { const b = e.target.closest('[data-mode]'); if (b) setMode(b.dataset.mode); });
 $('#scope').onchange = e => { S.scope = e.target.value; api('settings', { scope: S.scope }).catch(() => {}); runSearch(); };
 $('#sort').onchange = e => { S.sort = e.target.value; api('settings', { sort: S.sort }).catch(() => {}); runSearch(); };
-$('#help-btn').onclick = showHelp;
+
+// ===================================================================== 檢索語法速查
+// 不彈窗：工具欄 ? 下的面板，分「基本／篩選／正則」三欄；點例子即填入檢索框試一試，面板不關，可接著改。
+const SYN = {
+  basic: { label: '基本', rows: [
+    ['萬曆 張居正', '空格：同時包含'],
+    ['後金 | 建州', '<code>|</code> 或 <code>OR</code>：包含任一個'],
+    ['萬曆 -天啟', '<code>-</code> 或 <code>!</code>：排除包含該詞的文件'],
+    ['"Grand Secretary"', '引號：含空格的短語當作一個詞；引號裡的 <code>*</code> <code>?</code> 按字面'],
+    ['萬曆*年', '<code>*</code>：任意幾個字（不越過 。！？；）'],
+    ['萬曆??年', '<code>?</code>：一個字'],
+    ['*.pdf 明史', '通配符也用於文件名'],
+  ], note: '漢字按上方的精確／簡繁／異體互通，跨行斷開的詞也能找到。用了通配符時，命中的字一律按原字標色。' },
+  filter: { label: '篩選', append: true, rows: [
+    ['ext:pdf', '擴展名'],
+    ['ext:pdf;docx;doc', '幾種擴展名，用 <code>;</code> 分隔'],
+    ['-ext:json', '排除某種擴展名'],
+    ['size:>10mb', '大於 10 MB；單位 kb mb gb'],
+    ['size:<500kb', '小於 500 KB'],
+    ['size:1mb..20mb', '兩者之間'],
+    ['dm:2024', '修改於 2024 年；也可寫 2024-03、2024-03-15'],
+    ['dm:2023..2024-06', '時間段'],
+    ['dm:>2024-01', '某時以後；<code>&lt;</code> 以前'],
+    ['dm:本週', '今天 昨天 本週 上週 本月 上月 今年 去年'],
+    ['dm:30d', '最近 30 天'],
+    ['path:明史', '完整路徑含這幾個字（簡繁異體互通）'],
+    ['-path:草稿', '排除路徑'],
+  ], note: '篩選詞寫在檢索式裡，與檢索詞並用、都要滿足；只寫篩選詞就按條件列出文件。與側欄的篩選疊加。' },
+  regex: { label: '正則', regex: true, rows: [
+    ['萬曆.{1,4}年', '<code>.</code> 任一字，<code>{1,4}</code> 一到四個'],
+    ['[甲乙丙丁戊己庚辛壬癸][子丑寅卯辰巳午未申酉戌亥]', '方括號：其中任一字（這裡是干支）'],
+    ['(張|李)居正', '圓括號與 <code>|</code>：幾種之一'],
+    ['卷[一二三四五六七八九十]+', '<code>+</code> 一個以上，<code>*</code> 零個以上，<code>?</code> 可有可無'],
+    ['^第.{1,3}回', '<code>^</code> 行首，<code>$</code> 行尾'],
+    ['\\d{4}年', '<code>\\d</code> 數字，<code>\\s</code> 空白，<code>\\w</code> 字'],
+  ], note: '檢索框裡的 <b>.*</b>（⌘5）打開正則。整個檢索式（篩選詞以外）是一個正則，空格按字面。' +
+    '方括號外的漢字仍按匹配方式互通（萬 也配 万），方括號裡的不展開；不分大小寫。' +
+    '正則裡沒有一定出現的漢字時，要逐個文件掃，最多 6 秒。' },
+};
+const synOpen = () => !$('#synpanel').hidden;
+function renderSyn() {
+  const t = SYN[S.synTab] || SYN.basic, el = $('#synpanel');
+  el.innerHTML = `<div class="syn-head"><div class="seg syn-tabs" role="tablist">${Object.entries(SYN).map(([k, v]) =>
+      `<button role="tab" data-syn-tab="${k}" class="${k === S.synTab ? 'on' : ''}">${v.label}</button>`).join('')}</div>
+    <span class="syn-hint">${t.append ? '點例子，加到檢索框末尾' : t.regex ? '點例子，打開正則並填入' : '點例子，填入檢索框'}</span>
+    <button class="icon-btn" data-syn-close title="關閉（esc）">${I.x}</button></div>
+    <div class="syn-rows">${t.rows.map(([ex, d], i) =>
+      `<button class="syn-row" data-syn-ex="${i}"><code class="syn-ex">${esc(ex)}</code><span class="syn-d">${d}</span></button>`).join('')}</div>
+    <p class="syn-note">${t.note}</p>
+    <div class="syn-foot"><a href="#" data-syn-more>完整說明：範圍、原件、快捷鍵…</a></div>`;
+}
+function openSyn(tab) {
+  S.synTab = tab || (S.regex ? 'regex' : S.synTab);
+  closeQPanel();
+  renderSyn();
+  $('#synpanel').hidden = false;
+  $('#help-btn').classList.add('on');
+}
+function closeSyn() { $('#synpanel').hidden = true; $('#help-btn').classList.remove('on'); }
+$('#help-btn').onclick = () => (synOpen() ? closeSyn() : openSyn());
+$('#synpanel').addEventListener('mousedown', e => e.preventDefault());      // 不搶檢索框的焦點
+$('#synpanel').addEventListener('click', e => {
+  const tb = e.target.closest('[data-syn-tab]');
+  if (tb) { S.synTab = tb.dataset.synTab; return renderSyn(); }
+  if (e.target.closest('[data-syn-close]')) return closeSyn();
+  if (e.target.closest('[data-syn-more]')) { e.preventDefault(); closeSyn(); return showHelp(); }
+  const ex = e.target.closest('[data-syn-ex]');
+  if (!ex) return;
+  const t = SYN[S.synTab], v = t.rows[+ex.dataset.synEx][0];
+  if (t.append) {
+    const cur = qEl.value.trim();
+    qEl.value = cur.split(/\s+/).includes(v) ? cur : (cur ? cur + ' ' : '') + v;
+  } else {
+    qEl.value = v;
+    if (!!t.regex !== S.regex) setRegex(!!t.regex, true);
+  }
+  qEl.focus();
+  qEl.setSelectionRange(qEl.value.length, qEl.value.length);
+  onQuery();
+});
+document.addEventListener('mousedown', e => { if (synOpen() && !e.target.closest('.help-wrap, .search')) closeSyn(); });
 
 // ===================================================================== 檢索歷史、保存的檢索
 // 歷史：檢索停留三秒、按回車或打開了結果才記（打字途中的半截詞不記），存在本機資料庫裡，最多 60 條。
@@ -3104,7 +3207,8 @@ function currentParams() {
   if (f.exts && f.exts.length) flt.exts = f.exts.slice();
   if (f.only) flt.only = f.only;
   const p = { mode: S.mode, scope: S.scope };
-  if (S.fuzzy) p.fuzzy = S.fzSim;
+  if (S.regex) p.regex = true;
+  else if (S.fuzzy) p.fuzzy = S.fzSim;
   if (S.sort !== 'relevance') p.sort = S.sort;
   if (Object.keys(flt).length) p.filter = flt;
   return p;
@@ -3115,7 +3219,8 @@ const SCOPE_SHORT = { name: '僅文件名', all: '名稱與全文', content: '�
 function searchSummary(e) {
   const p = e.params || {}, f = p.filter || {}, out = [];
   out.push(MODE_LABEL[p.mode] || '異體');
-  if (p.fuzzy) out.push('模糊 ≥ ' + Math.round(p.fuzzy * 100) + '%');
+  if (p.regex) out.push('正則');
+  else if (p.fuzzy) out.push('模糊 ≥ ' + Math.round(p.fuzzy * 100) + '%');
   out.push(SCOPE_SHORT[p.scope] || '');
   if (hasTypes(f)) out.push(typesLabel(f, ' '));
   if (f.kind === 'notext') out.push('無文字層');
@@ -3158,13 +3263,14 @@ function applySearch(e) {
     $$('#mode button').forEach(b => b.classList.toggle('on', b.dataset.mode === S.mode));
     api('settings', { mode: S.mode }).catch(() => {});
   }
-  const fz = !!p.fuzzy;
+  const fz = !!p.fuzzy, rx = !!p.regex;
   if (fz !== S.fuzzy || (fz && p.fuzzy !== S.fzSim)) {
     S.fuzzy = fz;
     if (fz) S.fzSim = p.fuzzy;
-    renderFuzzy();
     api('settings', { fuzzy: S.fuzzy ? '1' : '0', fuzzy_sim: S.fzSim }).catch(() => {});
   }
+  if (rx !== S.regex) { S.regex = rx; api('settings', { regex: rx ? '1' : '0' }).catch(() => {}); }
+  renderFuzzy();
   if (p.scope && p.scope !== S.scope) { S.scope = p.scope; $('#scope').value = S.scope; api('settings', { scope: S.scope }).catch(() => {}); }
   const sort = p.sort || 'relevance';
   if (sort !== S.sort) { S.sort = sort; $('#sort').value = sort; api('settings', { sort }).catch(() => {}); }
@@ -3340,30 +3446,55 @@ async function trashDupGroup(gi) {
     loadDups();
   } catch (err) { fail(err); }
 }
+// 模糊與正則不能同時開：開一個就關掉另一個（兩個開關都看得見）
 function renderFuzzy() {
-  $('#fz').classList.toggle('on', S.fuzzy);
-  $('#fz-btn').setAttribute('aria-pressed', S.fuzzy ? 'true' : 'false');
+  const fz = S.fuzzy && !S.regex;
+  $('#fz').classList.toggle('on', fz);
+  $('#fz-btn').setAttribute('aria-pressed', fz ? 'true' : 'false');
+  $('#fz-btn').title = S.regex ? '模糊檢索（⌘4）—— 打開會關掉正則' : '模糊檢索：容許脫字、衍字、訛字（⌘4）';
   $('#fz-sim').value = S.fzSim;
+  const re = $('#q-re');
+  re.classList.toggle('on', S.regex);
+  re.setAttribute('aria-pressed', S.regex ? 'true' : 'false');
+  $('.search').classList.toggle('rx', S.regex);
+  qEl.placeholder = S.regex ? '正則表達式 —— 漢字仍按匹配方式互通，如 萬曆.{1,4}年' : '檢索文件名與全文 —— 簡、繁、異體互通';
 }
 function setFuzzy(on, sim) {
   S.fuzzy = !!on;
   if (sim) S.fzSim = sim;
+  const st = { fuzzy: S.fuzzy ? '1' : '0', fuzzy_sim: S.fzSim };
+  if (S.fuzzy && S.regex) { S.regex = false; st.regex = '0'; }
   renderFuzzy();
-  api('settings', { fuzzy: S.fuzzy ? '1' : '0', fuzzy_sim: S.fzSim }).catch(() => {});
+  api('settings', st).catch(() => {});
   S.limit = 200;
   runSearch({ keepScroll: true });
 }
+function setRegex(on, quiet) {
+  S.regex = !!on;
+  const st = { regex: S.regex ? '1' : '0' };
+  if (S.regex && S.fuzzy) { S.fuzzy = false; st.fuzzy = '0'; }
+  renderFuzzy();
+  api('settings', st).catch(() => {});
+  if (synOpen()) renderSyn();
+  S.limit = 200;
+  if (!quiet && S.q.trim()) runSearch({ keepScroll: true });
+}
+$('#q-re').addEventListener('mousedown', e => e.preventDefault());
+$('#q-re').onclick = () => setRegex(!S.regex);
 $('#fz-btn').onclick = () => setFuzzy(!S.fuzzy);
 $('#fz-sim').onchange = e => setFuzzy(true, e.target.value);
 
 function showHelp() {
   dialog({
-    title: '檢索語法', wide: true,
+    title: '使用說明', wide: true,
     body: `<table class="syntax">
       <tr><td>萬曆 張居正</td><td>空格分隔：同時包含兩個詞</td></tr>
       <tr><td>後金 | 建州</td><td><code>|</code>：包含任一個詞</td></tr>
-      <tr><td>萬曆 -天啟</td><td>減號：排除包含該詞的文件</td></tr>
+      <tr><td>萬曆 -天啟</td><td>減號（或 <code>!</code>）：排除包含該詞的文件</td></tr>
       <tr><td>"Grand Secretary"</td><td>引號：把含空格的西文短語當作一個詞</td></tr>
+      <tr><td>萬曆*年　萬曆??年</td><td>通配符：<code>*</code> 任意幾個字（不越過句末標點），<code>?</code> 一個字</td></tr>
+      <tr><td>ext:pdf size:>10mb</td><td>篩選詞：<code>ext:</code> 擴展名、<code>size:</code> 大小、<code>dm:</code> 修改時間、<code>path:</code> 路徑，前加 <code>-</code> 排除</td></tr>
+      <tr><td>.* 正則</td><td>檢索框裡的 <code>.*</code>（⌘5）：整個檢索式按正則表達式匹配，漢字仍按匹配方式互通</td></tr>
       <tr><td>万历</td><td>「異體」模式下可得 萬曆、萬歷、万暦、萬厤 等寫法；跨行斷開的詞也能找到</td></tr>
       <tr><td>≈ 模糊</td><td>工具欄的「模糊」：容許脫字、衍字、訛字，如「李自成攻陷京師」也可得「李自成陷京師」。
         按相似度（1 − 差異字數 ÷ 檢索詞字數）篩選，空白和標點不計；3 字以上的詞才模糊匹配，排除詞仍按原方式</td></tr>
@@ -3393,7 +3524,8 @@ function showHelp() {
       <span><span class="h3">模糊差異</span>（與檢索詞不同的字）</span></div>
     <div class="field"><label>快捷鍵</label><p class="hint" style="margin:0">
       ⌘K 檢索框 · ⌘F 在本文件內查找 · ↑↓ 選擇文件 · ↩ 打開 · 空格 快速查看 · ⌘R 在訪達中顯示 · ⌘G / ⇧⌘G 下一處／上一處命中 ·
-      ⌘D 收藏 · F2 重命名 · ⌘⌫ 移到廢紙簍 · ⌘1/2/3 切換匹配方式 · ⌘4 模糊開關</p></div>`,
+      ⌘D 收藏 · F2 重命名 · ⌘⌫ 移到廢紙簍 · ⌘1/2/3 切換匹配方式 · ⌘4 模糊開關 · ⌘5 正則開關</p></div>
+    <p class="hint">通配符、篩選詞、正則的寫法和例子：點工具欄右上角的 <b>?</b>。</p>`,
     buttons: [{ label: '知道了', primary: true, value: 'ok' }],
   });
 }
@@ -3404,7 +3536,7 @@ async function resetSettings() {
   const exChanged = def.excludes !== undefined && (st.excludes || '') !== def.excludes;
   const r = await dialog({
     title: '恢復默認設置？',
-    desc: '匹配方式（異體）、模糊檢索（關）、本文件內查找的模糊（關）、檢索範圍（僅文件名）、排序、名稱排序規則（跟隨系統）、跨標點匹配（關）、實時監聽（開）、' +
+    desc: '匹配方式（異體）、模糊檢索（關）、正則（關）、本文件內查找的模糊（關）、檢索範圍（僅文件名）、排序、名稱排序規則（跟隨系統）、跨標點匹配（關）、實時監聽（開）、' +
       '跳過代碼項目（開）、代碼與配置文件只收文件名，以及欄寬和閱讀字號，都恢復為默認。<br>' +
       '<b>資料庫、收藏、標籤、備註和索引都不受影響。</b>',
     body: (groups ? `<div class="field"><label class="switch"><input type="checkbox" id="rs-var">同時清空自定義異體字（${groups} 組）</label></div>` : '') +
@@ -3421,6 +3553,7 @@ async function resetSettings() {
     S.scope = s2.settings.scope || 'name';
     S.sort = s2.settings.sort || 'relevance';
     S.fuzzy = s2.settings.fuzzy === '1';
+    S.regex = s2.settings.regex === '1';
     S.fzSim = s2.settings.fuzzy_sim || '0.7';
     S.find.fz = s2.settings.find_fuzzy === '1';
     S.find.sim = s2.settings.find_sim || '0.7';
@@ -3521,10 +3654,11 @@ document.addEventListener('keydown', e => {
   const mod = e.metaKey || e.ctrlKey;
   if (mod && e.key === 'f' && !e.shiftKey && !e.altKey && openFind()) { e.preventDefault(); return; }
   if (mod && (e.key === 'k' || e.key === 'f' || e.key === 'l')) { e.preventDefault(); qEl.focus(); qEl.select(); return; }
-  if (e.key === 'Escape') { if (menuEl) return closeMenu(); return; }
+  if (e.key === 'Escape') { if (menuEl) return closeMenu(); if (synOpen()) return closeSyn(); return; }
   if (typing) return;
   if (mod && ['1', '2', '3'].includes(e.key)) { e.preventDefault(); return setMode(['exact', 'st', 'full'][+e.key - 1]); }
-  if (mod && e.key === '4') { e.preventDefault(); return setFuzzy(!S.fuzzy); }
+  if (mod && e.key === '4') { e.preventDefault(); return setFuzzy(!(S.fuzzy && !S.regex)); }
+  if (mod && e.key === '5') { e.preventDefault(); return setRegex(!S.regex); }
   if (mod && e.key.toLowerCase() === 'g') {
     e.preventDefault();
     if (S.pvTab === 'orig' && (V || DV)) return origHit(e.shiftKey ? -1 : 1);
@@ -3718,6 +3852,7 @@ async function init() {
     S.projects = st.projects || [];
     S.sort = st.settings.sort || 'relevance';
     S.fuzzy = st.settings.fuzzy === '1';
+    S.regex = st.settings.regex === '1' && !S.fuzzy;
     S.fzSim = ['0.9', '0.8', '0.7', '0.6', '0.5'].includes(st.settings.fuzzy_sim) ? st.settings.fuzzy_sim : '0.7';
     S.readerSize = Math.max(12, Math.min(28, +st.settings.reader_size || 16));
     S.find.fz = st.settings.find_fuzzy === '1';
