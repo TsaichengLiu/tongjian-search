@@ -55,7 +55,7 @@ const S = {
   res: null, items: [], cur: null, sel: new Set(), anchor: null,
   pv: null, pvTab: 'text', pvTabPref: 'text', hit: 0, hitEls: [], pendingPos: null,
   dirs: {}, openRoots: new Set(), openDirs: new Set(),
-  readerSize: 16, lastRescan: 0, pgLast: {}, pdfZoom: null, pdfFocus: null, docFocus: null,
+  readerSize: 16, lastRescan: 0, pgLast: {}, pdfZoom: null, pdfFocus: null, docFocus: null, kwicOpen: null, kwicData: null, kwicLimit: 500,
   pendingSel: null, ctx: null,
 };
 
@@ -596,7 +596,10 @@ async function runSearch(opt = {}) {
   renderResults();
   if (!opt.keepScroll) $('#res-list').scrollTop = 0;
   const shown = topPv(S.pv);
-  if (S.cur && (qChanged || !shown || shown.id !== S.cur || opt.reloadPreview)) loadPreview(S.cur);
+  if (S.kwicOpen && !S.items.some(i => i.id === S.kwicOpen)) S.kwicOpen = null;
+  if (S.kwicOpen && qChanged) { S.kwicLimit = 500; loadKwic(S.kwicOpen); }
+  if (S.cur && qChanged && !opt.reloadPreview && shown === S.pv && S.pv && S.pv.id === S.cur && !S.pv.folder && S.pv.text != null) refreshHits();
+  else if (S.cur && (qChanged || !shown || shown.id !== S.cur || opt.reloadPreview)) loadPreview(S.cur);
   else if (!S.cur) { S.pv = null; renderPreview(); }
 }
 function renderVariants() {
@@ -693,13 +696,16 @@ function itemHtml(it) {
     ${it.dupOf ? `<span class="dup-tag" title="與上面那份內容相同">副本</span>` : ''}
     ${nd ? `<button class="dup-chip${dopen ? ' open' : ''}" data-dups="${it.id}" title="${it.dup_kind === 't' ? '抽出的文字完全相同' : '文件逐字節相同（快速比對）'}，點擊${dopen ? '收起' : '展開'}">另有 ${nd} 個副本${I.chev}</button>` : ''}
     ${it.starred ? `<span class="it-star" title="已收藏">${I.starFill}</span>` : ''}
-    ${simBadge(it)}${it.hits ? `<span class="it-hits" title="全文命中">${fmtNum(it.hits)}${it.capped ? '+' : ''}</span>` : ''}</div>
+    ${simBadge(it)}${it.hits ? `<span class="it-hits" data-kwic="${it.id}" title="全文命中：點擊列出每一處的上下文">${fmtNum(it.hits)}${it.capped ? '+' : ''}</span>` : ''}</div>
     <div class="it-meta"><span class="it-path" title="${esc(it.dir)}">${esc(relDir(it))}</span>
     ${tags.length ? `<span class="it-tags">${tags.map(t => `<span class="tag-dot" title="${esc(t.name)}" style="background:${esc(t.color)}"></span>`).join('')}</span>` : ''}
     <span>${fmtSize(it.size)}</span><span class="sep">·</span><span>${fmtDate(it.mtime)}</span></div>`;
-  if (it.snippets && it.snippets.length && !it.dupOf) {
+  if (S.kwicOpen === it.id && !it.dupOf) h += kwicHtml(it);
+  else if (it.snippets && it.snippets.length && !it.dupOf) {
     h += '<div class="snips">' + it.snippets.map(s =>
       `<div class="snip" data-pos="${s.pos}">${s.page ? `<span class="pg">${s.page}</span>` : ''}${segsHtml(s.segs)}</div>`).join('') + '</div>';
+    if (it.hits > it.snippets.length || it.capped)
+      h += `<button class="snip-all" data-kwic="${it.id}" title="在這裡列出這個文件裡每一處命中的上下文">全部 ${fmtNum(it.hits)}${it.capped ? '+' : ''} 處${I.chev}</button>`;
   }
   return h + '</div>';
 }
@@ -767,6 +773,15 @@ function selectItem(id, e) {
 }
 $('#res-list').addEventListener('click', e => {
   if (e.target.closest('[data-act="add-root"]')) return addRoot();
+  const kw = e.target.closest('[data-kwic]');
+  if (kw) return toggleKwic(+kw.dataset.kwic);
+  if (e.target.closest('[data-kwic-more]')) { S.kwicLimit += 500; return loadKwic(S.kwicOpen); }
+  const kl = e.target.closest('.kwic .snip');
+  if (kl && !e.target.closest('.sh')) {                     // 點上下文的空白處：也跳到那一處
+    const id = +kl.closest('.item').dataset.id;
+    if (S.cur !== id) selectItem(id);
+    return revealHit(id, +kl.dataset.s0, +kl.dataset.s1);
+  }
   const dc = e.target.closest('[data-dups]');
   if (dc) {                                        // 展開／收起合併的副本
     const id = +dc.dataset.dups;
@@ -1127,6 +1142,25 @@ async function loadPreview(id, back) {
     if (seq === pvSeq) { S.pv = null; renderPreview(); fail(e); }
   }
 }
+// 同一個文件、只是檢索詞變了：只取新的命中位置（不重傳、不重排全文），只重畫命中有變化的段落
+async function refreshHits() {
+  const pv = S.pv, seq = ++pvSeq;
+  let r = { spans: [], diffs: [], qchars: '' };
+  if (S.q.trim()) {
+    try { r = await api(`find?id=${pv.id}&q=${encodeURIComponent(S.q)}&mode=${S.mode}${fzQS()}`); }
+    catch (err) { if (seq === pvSeq) loadPreview(pv.id); return; }
+  }
+  if (seq !== pvSeq || S.pv !== pv) return;
+  let spans = r.spans, diffs = r.diffs;
+  if (pv.truncated) {
+    const lim = pv.text.length;
+    spans = spans.filter(x => x[1] <= lim);
+    diffs = diffs.filter(i => i < lim);
+  }
+  pv.spans = spans; pv.diffs = diffs; pv.qchars = r.qchars;
+  if (S.pvTab === 'text') { if (!findActive()) remarkReader(); }
+  else if (S.pvTab === 'orig') origHitsChanged();
+}
 function tabsFor(pv) {
   const t = [];
   if (pv.status === 1) t.push('text');
@@ -1418,6 +1452,7 @@ async function renderDocView(body) {
       <button class="icon-btn pg-z" data-act="dv-zout" title="縮小（−）">−</button>
       <span class="pg-zl" id="pg-zl"></span>
       <button class="icon-btn pg-z" data-act="dv-zin" title="放大（＋）">＋</button>
+      <span class="vsep"></span><span class="oh" id="oh"></span>
       <span class="pg-hint" id="dv-hint">正在排版……</span>
     </div><div class="docv" id="docv" tabindex="0"></div>`;
   dv.box = $('#docv', body);
@@ -1438,6 +1473,7 @@ async function renderDocView(body) {
     dv.spans.length ? '黃＝命中（雙擊回到全文）· 紅框＝當前位置 · ' : '') + '按原文件重新排版，分頁與 Word 不同' +
     (m.truncated ? '；文件很長，只排了前一部分' : '');
   dvZoom(dv.zi, true);
+  renderOrigHitbar();
   bindDocView(dv);
   if (dv.focus) docFocus(dv.focus.s, dv.focus.e);
   dv.ro = new ResizeObserver(() => { if (DV === dv && dv.box.clientWidth) dvZoom(dv.zi, true); });
@@ -1584,6 +1620,9 @@ function docFocus(s, e) {
   const dv = DV;
   if (!dv || dv.stale || !dv.paper) return;
   e = e == null ? s : e;
+  dv.hitIdx = spanIndexAt(dv.spans, s);
+  renderOrigHitbar();
+  kwicSync(s);
   dv.box.querySelectorAll('.dfoc').forEach(x => x.classList.remove('dfoc'));
   const k = dv.spans.findIndex(sp => sp[0] < Math.max(e, s + 1) && sp[1] > s);
   let target = null;
@@ -1731,6 +1770,7 @@ function renderViewer(body, start) {
       <button class="icon-btn pg-z" data-act="pg-zout" title="縮小（−）">−</button>
       <span class="pg-zl" id="pg-zl"></span>
       <button class="icon-btn pg-z" data-act="pg-zin" title="放大（＋）">＋</button>
+      <span class="vsep"></span><span class="oh" id="oh"></span>
       <span class="pg-hint" id="pg-hint"></span>
     </div><div class="pdfv" id="pdfv" tabindex="0"><div class="pdfv-track"></div></div>`;
   V.box = $('#pdfv', body);
@@ -1740,6 +1780,7 @@ function renderViewer(body, start) {
   const p0 = start || (V.focus ? pageOfOffset(pv, V.focus.s) : 0) || S.pgLast[pv.id] || 1;
   V.box.scrollTop = pageTop(Math.max(1, Math.min(n, p0))) - 10;
   updHint();
+  renderOrigHitbar();
   bindViewer(V.box);
   syncPages();
   const v = V;
@@ -1884,6 +1925,9 @@ function vZoom(z) {
 // 跳到某處（檢索片段懸停、全文定位）：翻到那一頁，標註到了把它紅框標出、移到視區上部
 function focusOrig(s, e) {
   if (!V) return;
+  V.hitIdx = spanIndexAt(V.spans, s);
+  renderOrigHitbar();
+  kwicSync(s);
   V.focus = { id: V.id, s, e: e == null ? s : e };
   V.focused = false;
   V.moved = false;
@@ -1893,6 +1937,48 @@ function focusOrig(s, e) {
     syncPages();
   }
   for (const pg of V.live.values()) if (pg.marks) drawMarks(pg);
+}
+// ---- 原件上的命中：上一處／下一處（PDF 與 Word 通用）
+const spanIndexAt = (sp, s) => { const k = (sp || []).findIndex(x => x[1] > s); return k >= 0 && sp[k][0] <= s + 1 ? k : -1; };
+function renderOrigHitbar() {
+  const el = $('#oh'), st = V || DV;
+  if (!el || !st) return;
+  const n = (st.spans || []).length;
+  el.innerHTML = n ? `<button class="icon-btn" data-act="oh-prev" title="上一處命中（⇧⌘G）">${I.up}</button>
+    <span class="oh-pos">${st.hitIdx != null && st.hitIdx >= 0 ? `第 <b>${st.hitIdx + 1}</b> / ` : ''}${fmtNum(n)} 處</span>
+    <button class="icon-btn" data-act="oh-next" title="下一處命中（⌘G）">${I.down}</button><span class="vsep"></span>` : '';
+}
+function origHit(d) {
+  const st = V || DV, sp = st && st.spans;
+  if (!sp || !sp.length) return;
+  const k = st.hitIdx == null || st.hitIdx < 0 ? (d > 0 ? 0 : sp.length - 1) : (st.hitIdx + d + sp.length) % sp.length;
+  if (V) focusOrig(sp[k][0], sp[k][1]); else docFocus(sp[k][0], sp[k][1]);
+}
+// 檢索詞變了：原件上的標註跟著換（PDF 只重畫視區附近的頁；Word 稍候重排並保持位置）
+function origHitsChanged() {
+  if (V) {
+    V.spans = annotSpans();
+    V.hitIdx = -1;
+    V.focus = null;
+    for (const pg of V.live.values()) if (pg.marks) drawMarks(pg);
+    updHint();
+    renderOrigHitbar();
+  }
+  if (DV && DV.model) {
+    const dv = DV;
+    clearTimeout(dv.rt);
+    dv.rt = setTimeout(() => {
+      if (DV !== dv) return;
+      const top = dv.box.scrollTop;
+      dv.spans = dv.stale ? [] : annotSpans();
+      dv.runs = [];
+      dv.hitIdx = -1;
+      buildDocView(dv, dv.model);
+      dvZoom(dv.zi, true);
+      dv.box.scrollTop = top;
+      renderOrigHitbar();
+    }, 300);
+  }
 }
 // 相鄰的逐字框合成行（橫排）或列（豎排）
 function mergeBoxes(list) {
@@ -2228,6 +2314,66 @@ function bindViewer(box) {
   });
 }
 
+// ---- 展開全部命中：結果裡列出這個文件每一處命中的上下文（挨得近的併成一條），懸停、點擊都跳到那一處
+// 只展開一個文件；只在內存裡留這一個文件的上下文
+function kwicHtml(it) {
+  const d = S.kwicData && S.kwicData.id === it.id ? S.kwicData : null;
+  const head = `<div class="kwic-head"><span>${d ? `全部 <b>${fmtNum(d.total)}</b> 處${d.capped ? `，列出前 ${fmtNum(d.items.length)} 條
+    <button class="kwic-more" data-kwic-more title="再列出後面的命中">再列 500 條</button>` : ''}` : '正在列出全部命中……'}</span>
+    <button class="kwic-close" data-kwic="${it.id}" title="收起，回到幾條片段">收起${I.chev}</button></div>`;
+  if (!d) return head + '<div class="snips kwic"></div>';
+  return head + '<div class="snips kwic">' + d.items.map((c, k) =>
+    `<div class="snip kw" data-s0="${c.s0}" data-s1="${c.s1}"><span class="kn">${k + 1}</span>${c.page ? `<span class="pg">${c.page}</span>` : ''}${segsHtml(c.segs)}</div>`).join('') + '</div>';
+}
+function rerenderItem(id) {
+  const el = $(`#res-list .item[data-id="${id}"]`), it = S.items.find(i => i.id === id);
+  if (el && it) el.outerHTML = itemHtml(it);
+}
+const kwicKey = id => [id, S.q, S.mode, fzQS(), S.kwicLimit].join('|');
+async function loadKwic(id) {
+  const key = kwicKey(id);
+  if (S.kwicData && S.kwicData.key === key) return;
+  const box = S.kwicData && S.kwicData.id === id && $(`#res-list .item[data-id="${id}"] .kwic`);
+  const keep = box ? box.scrollTop : 0;                  // 「再列 500 條」時保持列表位置
+  S.kwicData = null;
+  if (!keep) rerenderItem(id);
+  try {
+    const r = await api(`contexts?id=${id}&q=${encodeURIComponent(S.q)}&mode=${S.mode}${fzQS()}&limit=${S.kwicLimit}`);
+    if (S.kwicOpen !== id || key !== kwicKey(id)) return;
+    S.kwicData = Object.assign(r, { id, key });
+    rerenderItem(id);
+    if (keep) { const b = $(`#res-list .item[data-id="${id}"] .kwic`); if (b) b.scrollTop = keep; }
+    if (S.pv && S.pv.id === id && S.spans && S.spans[S.hit] && S.pvTab === 'text') kwicSync(S.spans[S.hit][0]);
+  } catch (err) { fail(err); }
+}
+function toggleKwic(id) {
+  if (S.kwicOpen === id) {
+    S.kwicOpen = null;
+    S.kwicData = null;
+    return rerenderItem(id);
+  }
+  const prev = S.kwicOpen;
+  S.kwicOpen = id;
+  S.kwicLimit = 500;
+  if (prev) { S.kwicData = null; rerenderItem(prev); }
+  if (S.cur !== id) selectItem(id);
+  loadKwic(id);
+}
+// 預覽裡的當前位置 → 對應那條上下文標為當前（列表只在需要時滾一點）
+function kwicSync(s) {
+  if (!S.kwicOpen || !S.pv || S.pv.id !== S.kwicOpen) return;
+  const box = $(`#res-list .item[data-id="${S.kwicOpen}"] .kwic`);
+  if (!box) return;
+  let hit = null;
+  for (const el of box.children) {
+    if (+el.dataset.s0 <= s && s <= +el.dataset.s1) { hit = el; break; }
+  }
+  box.querySelectorAll('.kw.cur').forEach(x => { if (x !== hit) x.classList.remove('cur'); });
+  if (!hit) return;
+  hit.classList.add('cur');
+  const br = box.getBoundingClientRect(), r = hit.getBoundingClientRect();
+  if (r.top < br.top || r.bottom > br.bottom) box.scrollTop += r.top - br.top - box.clientHeight / 3;
+}
 // ---- 檢索片段懸停：預覽跳到那處命中（全文：跳到那處；原件：翻到那頁、紅框標出）
 // 只對已單擊選中、正在預覽的那個條目起作用；鼠標劃過別的條目不會跳
 let hoverTimer = 0, hoverKey = '';
@@ -2471,6 +2617,8 @@ function paintReader() {
     frag.appendChild(note);
   }
   S.hitEls = new Array(spans.length);
+  S.rb = [];
+  const ctx = { text, qset, diffs, canOrig };
   let si = 0, run = null;
   const flushRun = () => {         // 連續的空白頁合成一行，免得幾千個空頁拖慢顯示
     if (!run) return;
@@ -2489,30 +2637,9 @@ function paintReader() {
     const div = document.createElement('div');
     div.className = 'blk';
     div.dataset.a = a;
-    if (page) {
-      div.dataset.page = page;
-      const hd = document.createElement('div');
-      hd.className = 'pghd';
-      hd.textContent = `第 ${page} 頁`;
-      div.appendChild(hd);
-    }
-    let pos = a;
-    while (si < spans.length && spans[si][0] < b) {
-      const [s, e] = spans[si];
-      const ss = Math.max(s, pos), ee = Math.min(e, b);
-      if (ss > pos) div.appendChild(document.createTextNode(text.slice(pos, ss)));
-      if (ee > ss) {
-        const m = document.createElement('mark');
-        m.dataset.i = si;
-        if (canOrig) m.title = '雙擊：在原件中查看';
-        fillMark(m, text.slice(ss, ee), qset, ss, diffs);
-        div.appendChild(m);
-        if (!S.hitEls[si]) S.hitEls[si] = m;
-      }
-      pos = Math.max(pos, ee);
-      if (e <= b) si++; else break;
-    }
-    if (pos < b) div.appendChild(document.createTextNode(text.slice(pos, b)));
+    if (page) div.dataset.page = page;
+    si = fillBlock(div, a, b, page, spans, si, ctx);
+    S.rb.push({ a, b, page, el: div });
     frag.appendChild(div);
   }
   flushRun();
@@ -2534,6 +2661,59 @@ function paintReader() {
     return requestAnimationFrame(() => selectReaderRange(s, e));
   }
   if (spans.length) requestAnimationFrame(() => gotoHit(start));
+}
+// 一塊（一頁或一段）的內容：文字＋命中；返回處理到的命中序號（跨塊的命中留給下一塊接著畫）
+function fillBlock(div, a, b, page, spans, si, ctx) {
+  const { text, qset, diffs, canOrig } = ctx;
+  div.textContent = '';
+  if (page) {
+    const hd = document.createElement('div');
+    hd.className = 'pghd';
+    hd.textContent = `第 ${page} 頁`;
+    div.appendChild(hd);
+  }
+  let pos = a;
+  while (si < spans.length && spans[si][0] < b) {
+    const [s, e] = spans[si];
+    const ss = Math.max(s, pos), ee = Math.min(e, b);
+    if (ss > pos) div.appendChild(document.createTextNode(text.slice(pos, ss)));
+    if (ee > ss) {
+      const m = document.createElement('mark');
+      m.dataset.i = si;
+      if (canOrig) m.title = '雙擊：在原件中查看';
+      fillMark(m, text.slice(ss, ee), qset, ss, diffs);
+      div.appendChild(m);
+      if (!S.hitEls[si]) S.hitEls[si] = m;
+    }
+    pos = Math.max(pos, ee);
+    if (e <= b) si++; else break;
+  }
+  if (pos < b) div.appendChild(document.createTextNode(text.slice(pos, b)));
+  return si;
+}
+// 換了檢索詞（或查找詞）：只重畫原先或現在有命中的塊——幾千頁的書也只動幾十頁
+function remarkReader() {
+  const pv = S.pv, reader = $('#reader');
+  if (!pv || !reader || pv.text == null || !S.rb || !reader.contains(S.rb[0] && S.rb[0].el)) return paintReader();
+  const src = findActive() ? (findReady() ? S.find.res : { spans: [], diffs: [], qchars: '' }) : pv;
+  const spans = mergeSpans(src.spans), old = S.spans || [];
+  const ctx = { text: pv.text, qset: new Set(Array.from(src.qchars || '')),
+    diffs: src.diffs && src.diffs.length ? new Set(src.diffs) : null, canOrig: canOrigPv(pv) };
+  const hits = (list, a, b) => {
+    let lo = 0, hi = list.length;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (list[m][1] <= a) lo = m + 1; else hi = m; }
+    return lo < list.length && list[lo][0] < b;
+  };
+  S.hitEls = new Array(spans.length);
+  let si = 0;
+  for (const blk of S.rb) {
+    while (si < spans.length && spans[si][1] <= blk.a) si++;
+    if (hits(old, blk.a, blk.b) || (si < spans.length && spans[si][0] < blk.b)) si = fillBlock(blk.el, blk.a, blk.b, blk.page, spans, si, ctx);
+  }
+  S.spans = spans;
+  S.hit = 0;
+  renderHitbar();
+  if (spans.length) requestAnimationFrame(() => gotoHit(0));
 }
 // ---- 本文件內查找（⌘F）：與主檢索框無關，用同樣的匹配方式和模糊設置
 let findTimer = null, findSeq = 0;
@@ -2565,7 +2745,7 @@ async function runFind() {
   clearTimeout(findTimer);
   const pv = S.pv;
   if (!pv || pv.folder || pv.status !== 1) return;
-  if (!S.find.q.trim()) { S.find.res = null; S.find.busy = false; findSeq++; return paintReader(); }
+  if (!S.find.q.trim()) { S.find.res = null; S.find.busy = false; findSeq++; return remarkReader(); }
   const seq = ++findSeq, key = findKey();
   S.find.busy = true;
   renderHitbar();
@@ -2574,7 +2754,7 @@ async function runFind() {
     if (seq !== findSeq || !S.pv || S.pv.id !== pv.id) return;
     S.find.res = { id: pv.id, key, spans: r.spans, diffs: r.diffs, qchars: r.qchars };
     S.find.busy = false;
-    paintReader();
+    remarkReader();
   } catch (e) {
     if (seq === findSeq) { S.find.busy = false; renderHitbar(); }
     fail(e);
@@ -2635,9 +2815,12 @@ function gotoHit(i) {
   if (old) $$(`mark[data-i="${S.hit}"]`, $('#reader')).forEach(m => m.classList.remove('cur'));
   S.hit = i;
   $$(`mark[data-i="${i}"]`, $('#reader')).forEach(m => m.classList.add('cur'));
+  // 只量一次位置、直接設滾動位置：長文本裡每次強制排版要幾十毫秒，scrollIntoView 會再排一次
   const rd = $('#reader'), el = S.hitEls[i], rr = el.getBoundingClientRect();
-  if (!rd || !rr.height || !inView(rd, rr)) el.scrollIntoView({ block: 'center' });
+  if (!rd || !rr.height) el.scrollIntoView({ block: 'center' });
+  else if (!inView(rd, rr)) rd.scrollTop += rr.top - rd.getBoundingClientRect().top - rd.clientHeight / 2 + rr.height / 2;
   renderHitbar();
+  if (S.spans && S.spans[i] && !findActive()) kwicSync(S.spans[i][0]);
 }
 
 $('#preview').addEventListener('click', async e => {
@@ -2724,6 +2907,8 @@ $('#preview').addEventListener('click', async e => {
     case 'pg-zin': return V && vZoom(V.zi + 1);
     case 'pg-zout': return V && vZoom(V.zi - 1);
     case 'dv-zin': return DV && dvZoom(DV.zi + 1);
+    case 'oh-prev': return origHit(-1);
+    case 'oh-next': return origHit(1);
     case 'dv-zout': return DV && dvZoom(DV.zi - 1);
     case 'find-fz': {
       S.find.fz = !S.find.fz;
@@ -3190,6 +3375,9 @@ function showHelp() {
     <div class="field"><label>檢索歷史與保存的檢索</label>
       <p class="hint" style="margin:0">點空的檢索框、點框裡的時鐘圖標或按 ↓，列出保存的檢索和最近的檢索（連同匹配方式、模糊、範圍和篩選），↑↓ 選、回車重跑。<br>
       結果上方的 ☆ 把當前檢索保存到側欄。側欄「類型」每行一類：點行選整類，點附標只選這一種擴展名，可多選，「＋」可輸入任意擴展名；什麼都不選就是全部類型。</p></div>
+    <div class="field"><label>全部命中、逐處跳</label>
+      <p class="hint" style="margin:0">點結果裡的「全部 N 處」（或命中數），在結果裡展開這個文件每一處命中的上下文，懸停、點擊即跳過去。<br>
+      全文和原件裡都可以用 ⌘G／⇧⌘G 跳到下一處、上一處命中。</p></div>
     <div class="field"><label>重複文件</label>
       <p class="hint" style="margin:0">檢索結果裡內容相同的文件合成一條，點「另有 N 個副本」展開。側欄「重複文件」列出全部重複的組，選留一份，其餘移到廢紙簍（移動前逐字節核對）。</p></div>
     <div class="field"><label>PDF 原件</label>
@@ -3337,7 +3525,11 @@ document.addEventListener('keydown', e => {
   if (typing) return;
   if (mod && ['1', '2', '3'].includes(e.key)) { e.preventDefault(); return setMode(['exact', 'st', 'full'][+e.key - 1]); }
   if (mod && e.key === '4') { e.preventDefault(); return setFuzzy(!S.fuzzy); }
-  if (mod && e.key.toLowerCase() === 'g') { e.preventDefault(); return gotoHit(S.hit + (e.shiftKey ? -1 : 1)); }
+  if (mod && e.key.toLowerCase() === 'g') {
+    e.preventDefault();
+    if (S.pvTab === 'orig' && (V || DV)) return origHit(e.shiftKey ? -1 : 1);
+    return gotoHit(S.hit + (e.shiftKey ? -1 : 1));
+  }
   if (inQ) return;
   if (e.key === '/' ) { e.preventDefault(); qEl.focus(); qEl.select(); return; }
   if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && V && S.pvTab === 'orig' && $('#pdfv')) {

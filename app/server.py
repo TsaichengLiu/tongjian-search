@@ -279,6 +279,10 @@ class Handler(BaseHTTPRequestHandler):
     def api_pageboxes(self, p, b):
         return App.lib.page_boxes(int(p["id"]), int(p.get("p") or 1))
 
+    def api_contexts(self, p, b):
+        lim = max(1, min(5000, int(p.get("limit") or 500)))
+        return App.lib.contexts(int(p["id"]), p.get("q", ""), p.get("mode", "full"), fuzzy_param(p), limit=lim)
+
     def api_find(self, p, b):
         return App.lib.find_in(int(p["id"]), p.get("q", ""), p.get("mode", "full"), fuzzy_param(p))
 

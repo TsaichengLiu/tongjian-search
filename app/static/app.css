@@ -391,6 +391,30 @@ select:focus { border-color: var(--accent); }
   font: 13.5px/1.7 var(--serif); color: var(--text-2); overflow: hidden; display: -webkit-box;
   -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-all;
 }
+/* 展開全部命中 */
+.snip-all {
+  margin: 5px 0 0 43px; border: 0; background: none; padding: 1px 0; color: var(--text-3); font-size: 11.5px;
+  display: inline-flex; align-items: center; gap: 2px;
+}
+.snip-all svg, .kwic-close svg { width: 11px; height: 11px; transform: rotate(90deg); }
+.kwic-close svg { transform: rotate(-90deg); }
+.snip-all:hover, .kwic-close:hover { color: var(--accent); }
+.it-hits[data-kwic] { cursor: pointer; }
+.it-hits[data-kwic]:hover { background: var(--accent-soft-2); }
+.kwic-head { display: flex; align-items: center; justify-content: space-between; margin: 8px 0 2px 43px; font-size: 11.5px; color: var(--text-3); }
+.kwic-head b { color: var(--text-2); }
+.kwic-more { border: 0; background: none; padding: 0 0 0 6px; color: var(--accent); font-size: 11.5px; }
+.kwic-more:hover { text-decoration: underline; }
+.kwic-close { border: 0; background: none; color: var(--text-3); font-size: 11.5px; display: inline-flex; align-items: center; gap: 2px; padding: 0; }
+.snips.kwic {
+  margin-top: 2px; max-height: min(56vh, 520px); overflow-y: auto; gap: 1px; padding: 2px 4px 4px 0;
+  border-top: 1px solid var(--line); overscroll-behavior: contain;
+}
+.snips.kwic:empty { min-height: 24px; }
+.kwic .snip { padding: 3px 6px 3px 0; border-radius: 6px; cursor: pointer; }
+.kwic .snip:hover { background: rgba(120, 100, 70, .06); }
+.kwic .snip.cur { background: var(--sel); box-shadow: inset 2px 0 0 var(--accent); }
+.kwic .kn { display: inline-block; min-width: 2.2em; text-align: right; margin-right: 6px; font: 500 10.5px var(--ui); color: var(--text-3); font-variant-numeric: tabular-nums; vertical-align: 1px; }
 .snip .pg {
   display: inline-block; font: 600 10px/16px var(--ui); color: var(--text-3); border: 1px solid var(--line-2);
   border-radius: 4px; padding: 0 4px; margin-right: 6px; vertical-align: 1px;
@@ -577,6 +601,9 @@ mark, .h1, .h2 { color: inherit; border-radius: 2px; }
 .dpaper .dtb td { border: 1px solid #9a9a9a; padding: 2px 6px; vertical-align: top; }
 .dpaper .dbox { border: 1px solid #bcbcbc; padding: 4px 8px; margin: 4px 0; white-space: normal; }
 .dpaper .dimg { max-width: 100%; height: auto; vertical-align: middle; }
+.oh { display: inline-flex; align-items: center; gap: 2px; font-size: 12px; color: var(--text-2); white-space: nowrap; }
+.oh:empty { display: none; }
+.oh .oh-pos { padding: 0 3px; font-variant-numeric: tabular-nums; }
 .dpaper .dpic { display: inline-block; vertical-align: middle; margin: 0 2px; padding: 0 6px; height: 1.4em; line-height: 1.4em;
   border: 1px dashed #b9b2a5; border-radius: 3px; color: #9a9384; font-size: .8em; }
 .dpaper .dpic::after { content: "圖"; }

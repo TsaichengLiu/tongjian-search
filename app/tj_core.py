@@ -2359,6 +2359,51 @@ class Library(object):
         spans, diffs, qchars = self.doc_hits(text, q, level, fz)
         return {"spans": spans, "diffs": diffs, "qchars": qchars}
 
+    def contexts(self, fid, q, level, fz=None, limit=500, before=30, after=46):
+        """一個文件裡全部命中的上下文（結果列表裡「全部 N 處」用）：挨得近的命中併成一條，兩頭省略號。"""
+        self.last_use = _now()
+        text = self.get_text(fid)
+        if text is None or not (q or "").strip():
+            return {"total": 0, "items": [], "capped": False}
+        Q = self._query(q, level, fz)
+        merged = []
+        for s, e in self.doc_hits(text, q, level, fz, u16=False)[0]:
+            if merged and s <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(e, merged[-1][1]))
+            else:
+                merged.append((s, e))
+        wins, capped = [], False
+        for s, e in merged:
+            if wins and s < wins[-1][1] and s - wins[-1][0] < 360:
+                w = wins[-1]
+                w[1] = min(len(text), max(w[1], e + after))
+                w[3] = e
+            elif len(wins) >= limit:
+                capped = True
+                break
+            else:
+                wins.append([max(0, s - before), min(len(text), e + after), s, e])
+        page_starts = [0] + [m.end() for m in re.finditer("\f", text)] if "\f" in text else None
+        starts = [x for x, y in merged]
+        conv = u16_mapper(text)
+        cv = conv or (lambda x: x)
+        items = []
+        for a, b, s0, s1 in wins:
+            k0, k1 = bisect.bisect_left(starts, a), bisect.bisect_left(starts, b)
+            inner = [(max(a, x), min(b, y)) for x, y in merged[max(0, k0 - 1):k1] if y > a and x < b]
+            segs = self.segs(text[a:b], [(x - a, y - a) for x, y in inner], Q, base=a)
+            for sg in segs:
+                sg[0] = re.sub(r"\s+", " ", sg[0])
+                if len(sg) > 2:
+                    sg[2], sg[3] = cv(sg[2]), cv(sg[3])
+            if a > 0:
+                segs.insert(0, ["…", 0])
+            if b < len(text):
+                segs.append(["…", 0])
+            items.append({"segs": segs, "s0": cv(s0), "s1": cv(s1),
+                          "page": bisect.bisect_right(page_starts, s0) if page_starts else None})
+        return {"total": len(merged), "items": items, "capped": capped}
+
     def preview(self, fid, q, level, max_chars=4000000, fz=None):
         self.last_use = _now()
         c = self.conn()
